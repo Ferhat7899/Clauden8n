@@ -1,0 +1,2281 @@
+{
+  "name": "Agro World AI Order Intake Agent V8.0.2",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "output": "raw",
+        "filters": {
+          "foldersToInclude": [
+            "AQMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAADlwi9W2qzFU2Av07RE3sAJwEAC3M8FO3SwE2VTGliF34_BgAAAgEMAAAA"
+          ],
+          "readStatus": "unread"
+        },
+        "options": {}
+      },
+      "id": "ad5ac283-23ec-418e-8386-2c3b1976c7cc",
+      "name": "Outlook Trigger",
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [
+        5920,
+        19104
+      ],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst msg = $json || {};\nconst norm = (v) => String(v || '').replace(/\\r/g, '\\n').trim();\nconst lower = (v) => norm(v).toLowerCase();\nconst email = (obj) => lower(obj?.emailAddress?.address);\n\nfunction htmlToText(html) {\n  let t = String(html || '');\n  // Remove style/script blocks\n  t = t.replace(/<style[\\s\\S]*?<\\/style>/gi, '');\n  t = t.replace(/<script[\\s\\S]*?<\\/script>/gi, '');\n  // Convert table cells to spaces, rows to newlines\n  t = t.replace(/<\\/td>/gi, ' ').replace(/<\\/tr>/gi, '\\n');\n  // Convert block elements to newlines\n  t = t.replace(/<br\\s*\\/?>/gi, '\\n').replace(/<\\/p>/gi, '\\n').replace(/<\\/div>/gi, '\\n').replace(/<\\/li>/gi, '\\n');\n  // Strip remaining tags\n  t = t.replace(/<[^>]+>/g, ' ');\n  // Decode HTML entities\n  t = t.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')\n       .replace(/&gt;/gi, '>').replace(/&quot;/gi, '\"').replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(n))\n       .replace(/&[a-z]+;/gi, ' ');\n  // Clean whitespace\n  t = t.replace(/\\u00a0/g, ' ').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n');\n  return t.trim();\n}\n\nfunction stripThread(text, isForward) {\n  if (isForward) return String(text || '').trim();\n  const markers = [\n    /^from:\\s.+$/im, /^van:\\s.+$/im, /^von:\\s.+$/im,\n    /^sent:\\s.+$/im, /^verzonden:\\s.+$/im, /^gesendet:\\s.+$/im,\n    /^on .+ wrote:$/im, /^op .+ schreef .+:$/im,\n    /^-----\\s*original message\\s*-----$/im\n  ];\n  let r = String(text || '');\n  for (const m of markers) {\n    const match = r.match(m);\n    if (match?.index > 10) r = r.slice(0, match.index).trim();\n  }\n  return r.split('\\n').filter(l => !/^>+/.test(l.trim())).join('\\n').trim();\n}\n\nfunction stripSig(text) {\n  const sigs = [\n    /^met vriendelijke groet/i, /^kind regards/i, /^best regards/i,\n    /^mit freundlichen gr/i, /^mvg[,\\s]/i, /^--\\s*$/,\n    /^med venlig hilsen/i\n  ];\n  const lines = String(text || '').split('\\n');\n  for (let i = 0; i < lines.length; i++) {\n    if (sigs.some(re => re.test(lines[i].trim()))) return lines.slice(0, i).join('\\n').trim();\n  }\n  return lines.join('\\n').trim();\n}\n\nconst subject = norm(msg.subject);\nconst bodyPreview = norm(msg.bodyPreview);\nconst bodyHtml = norm(msg.body?.content);\nconst bodyText = htmlToText(bodyHtml);\n\n// Detect forwarded or replied mail\nconst isForward = /^(FW:|Fwd:|WG:)/i.test(subject.trim());\nconst isReply = /^(RE:|AW:)/i.test(subject.trim());\n\n// Strip thread for replies, keep full body for forwards\nconst cleanBody = stripSig(stripThread(bodyText, isForward));\nconst finalBody = cleanBody.length >= 20 ? cleanBody : [bodyPreview, bodyText].filter(Boolean).join('\\n\\n');\n\n// Dedup check\nconst store = $getWorkflowStaticData('global');\nif (!Array.isArray(store.processedEmails)) store.processedEmails = [];\nconst msgId = msg.id || '';\nconst internetMsgId = msg.internetMessageId || '';\nconst uniqueKey = internetMsgId || msgId;\nconst alreadyProcessed = uniqueKey ? store.processedEmails.includes(uniqueKey) : false;\n\n// Extract original sender from forwarded headers\nconst allText = [subject, bodyPreview, bodyText].join('\\n');\nconst senderPatterns = [\n  /(?:van|from|von):\\s.*?<([^>]+@[^>]+)>/i,\n  /(?:van|from|von):\\s.*?([a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,})/i\n];\nlet origSender = '';\nfor (const p of senderPatterns) {\n  const m = allText.match(p);\n  if (m?.[1]) { origSender = m[1].toLowerCase(); break; }\n}\nif (!origSender) origSender = email(msg.from) || email(msg.sender) || '';\n\n// Detect feedback from colleagues\nconst isFeedback = /feedback/i.test(subject) && (email(msg.from) || '').endsWith('@agroworld.nl');\n\nreturn {json: {\n  ...msg,\n  source_type: 'email',\n  message_id: msgId,\n  email_id: msgId,\n  internet_message_id: internetMsgId,\n  unique_key: uniqueKey,\n  has_attachments: !!msg.hasAttachments,\n  from_address: email(msg.from),\n  sender_address: email(msg.sender),\n  original_sender_address: origSender,\n  to_addresses: (msg.toRecipients || []).map(email).filter(Boolean),\n  mail_subject: subject,\n  mail_body_preview: bodyPreview,\n  mail_body_html: bodyHtml,\n  mail_text: finalBody.slice(0, 20000),\n  received_at: msg.receivedDateTime || '',\n  already_processed: alreadyProcessed,\n  skip_processing: alreadyProcessed,\n  is_forward: isForward,\n  is_feedback: isFeedback,\n}};\n"
+      },
+      "id": "00b3d0eb-1c4f-4a23-927b-300f8f5f38b4",
+      "name": "Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6144,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.skip_processing }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "25ccf5d4-f0fe-4f4b-9573-19c04f948827",
+      "name": "Already Processed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6336,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.has_attachments }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3c611239-3c42-4fd3-902b-e85f6fe89dab",
+      "name": "Has Attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6752,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nreturn {json: {...$json,\n  processing_mode: 'mail_only',\n  attachment_name: '', attachment_extension: '', attachment_mime_type: '',\n  extracted_attachment_text: '',\n  attachment_summary: 'Geen bijlage. AI analyseert uitsluitend de mailinhoud.',\n}};\n"
+      },
+      "id": "894bf93f-b84f-428d-a06f-043c7488309b",
+      "name": "Mail-only Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6864,
+        19296
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "getAll",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "520f2def-8c35-4603-82cf-0c5b355606a4",
+      "name": "Get Attachments",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        6864,
+        18896
+      ],
+      "webhookId": "d3057477-1131-44e4-83e1-bfb5a1979999",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst upstream = $('Normalize Email').item.json;\nconst name = String($json.name || $json.filename || '').trim();\nconst ext = (name.match(/\\.([^.]+)$/)?.[1] || '').toLowerCase();\nreturn {json: {\n  ...upstream,\n  attachment_id: $json.id || '',\n  attachment_name: name,\n  attachment_extension: ext,\n  attachment_mime_type: $json.contentType || '',\n  attachment_size: $json.size || 0,\n}};\n"
+      },
+      "id": "1ba7c85d-d312-4cb7-bf89-640194ae4e92",
+      "name": "Prep Attachment Meta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7104,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ [\"xml\"].includes($json.attachment_extension.toLowerCase()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ [\"pdf\"].includes($json.attachment_extension.toLowerCase()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ [\"xlsx\",\"xls\"].includes($json.attachment_extension.toLowerCase()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ [\"txt\",\"md\",\"eml\",\"yaml\",\"yml\"].includes($json.attachment_extension.toLowerCase()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ [\"jpg\",\"jpeg\",\"png\",\"gif\",\"bmp\",\"tiff\",\"webp\"].includes($json.attachment_extension.toLowerCase()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.attachment_extension }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEquals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "allMatchingOutputs": false
+        }
+      },
+      "id": "c033e9a6-b11d-4121-993a-4afdeca3498a",
+      "name": "Attachment Type Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.1,
+      "position": [
+        7344,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "115469b1-61df-44d8-bb8c-2109c7ca34f8",
+      "name": "Download XML",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        18496
+      ],
+      "webhookId": "2529fbaf-3a0a-494d-b5d8-34dde872b9c1",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "xml",
+        "binaryPropertyName": "attachment",
+        "destinationKey": "xmlData",
+        "options": {}
+      },
+      "id": "635e5f7e-dfab-4666-87c0-f7b8a8ab4927",
+      "name": "Extract XML",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        7824,
+        18496
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nconst xmlData = $json.xmlData || $json;\nconst raw = typeof xmlData === 'string' ? xmlData : JSON.stringify(xmlData);\n\n// Try to pre-parse VFPData for cleaner AI input\nlet text = raw;\ntry {\n  if (/<VFPData/i.test(raw)) {\n    const recs = [];\n    const re = /<query>([\\s\\S]*?)<\\/query>/gi;\n    let m;\n    while ((m = re.exec(raw)) !== null) {\n      const fields = {};\n      const fr = /<([A-Za-z0-9_:-]+)>([\\s\\S]*?)<\\/\\1>/g;\n      let fm;\n      while ((fm = fr.exec(m[1])) !== null) {\n        const v = fm[2].replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/<!\\[CDATA\\[/,'').replace(/\\]\\]>/,'').trim();\n        if (v) fields[fm[1]] = v;\n      }\n      if (Object.keys(fields).length > 0) recs.push(fields);\n    }\n    if (recs.length > 0) {\n      text = JSON.stringify(recs, null, 1);\n    }\n  }\n} catch(e) {\n  // Fall back to raw\n}\n\nreturn {json: {\n  ...meta,\n  processing_mode: 'attachment_xml',\n  extracted_attachment_text: String(text || '').slice(0, 120000),\n  attachment_summary: 'XML geparseerd (' + (text.length < raw.length ? 'gestructureerd' : 'raw') + ').',\n}};\n"
+      },
+      "id": "90fb6ccf-a37f-47a7-9296-c0dbe8b5748b",
+      "name": "XML Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8064,
+        18496
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "f901ac2a-0d99-4ec8-bdd2-2c8c990018db",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        18704
+      ],
+      "webhookId": "538394eb-e463-4571-a289-fa7d29881719",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment",
+        "options": {}
+      },
+      "id": "ee6e8206-322c-4f90-822e-8768f6865bfb",
+      "name": "Extract PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        7824,
+        18704
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nconst payload = $json.text || $json.data || $json;\nconst text = typeof payload === 'string' ? payload : JSON.stringify(payload);\nreturn {json: {\n  ...meta,\n  processing_mode: 'attachment_pdf',\n  extracted_attachment_text: String(text || '').slice(0, 120000),\n  attachment_summary: 'PDF bijlage geextraheerd voor AI interpretatie.',\n}};\n"
+      },
+      "id": "0f54cf90-c9c6-497f-90c8-e9a5cc70876b",
+      "name": "PDF Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8064,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "7bdf16a3-c7fb-4674-b661-d2cf46f59cc9",
+      "name": "Download XLSX",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        18896
+      ],
+      "webhookId": "b7f65d37-a88c-4f90-b1c4-11c2f36ba54f",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "attachment",
+        "options": {
+          "headerRow": true,
+          "includeEmptyCells": false
+        }
+      },
+      "id": "9284b178-5088-46ea-be67-3173f53b2621",
+      "name": "Extract XLSX",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        7824,
+        18896
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nconst items = $input.all();\nconst payload = items.map(i => i.json);\nconst text = JSON.stringify(payload, null, 2);\nreturn [{json: {\n  ...meta,\n  processing_mode: 'attachment_xlsx',\n  extracted_attachment_text: String(text || '').slice(0, 120000),\n  attachment_summary: 'Excel bijlage (XLSX/XLS) geextraheerd als JSON rijen voor AI interpretatie.',\n}}];\n"
+      },
+      "id": "4ae4054a-b36c-4b94-9719-7a20f19d50fc",
+      "name": "XLSX Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8064,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "e7df13c3-be1d-4f38-b62d-d591bf684063",
+      "name": "Download Text",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        19104
+      ],
+      "webhookId": "93aa580b-436a-4f3a-9eb3-fa730b3e1f23",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nconst bin = $binary || {};\nconst key = Object.keys(bin)[0];\nlet text = '';\nif (key) { try { text = Buffer.from(bin[key].data, 'base64').toString('utf8').slice(0,120000); } catch(e){} }\nreturn {json: {\n  ...meta,\n  processing_mode: 'attachment_text',\n  extracted_attachment_text: text,\n  attachment_summary: 'Tekst bijlage geextraheerd.',\n}};\n"
+      },
+      "id": "dccf5ceb-a164-4738-b11b-022a7ecd2cfc",
+      "name": "Text Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7824,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "09176317-1b0b-41c0-b40b-3025b882428a",
+      "name": "Download Image",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        19296
+      ],
+      "webhookId": "1867ec22-9678-4b85-9f7a-25a6f935c8b6",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nreturn {json: {\n  ...meta,\n  processing_mode: 'attachment_image',\n  extracted_attachment_text: 'Afbeelding bijlage. Extensie: ' + meta.attachment_extension + '. Naam: ' + meta.attachment_name + '. AI gebruikt mailcontext.',\n  attachment_summary: 'Afbeelding bijlage zonder OCR.',\n}};\n"
+      },
+      "id": "a2267b10-6d12-4e02-b8ec-e918ffd429df",
+      "name": "Image Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7824,
+        19296
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.attachment_id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "attachment"
+      },
+      "id": "bd437472-9954-45bb-bb80-7ed6495d8639",
+      "name": "Download Universal",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        19504
+      ],
+      "webhookId": "1b4ef639-54b7-4a24-8406-3270e38ee327",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst meta = $('Prep Attachment Meta').item.json;\nconst bin = $binary || {};\nconst key = Object.keys(bin)[0];\nconst b = key ? bin[key] : null;\nlet hexPreview = '';\nif (b?.data) { try { hexPreview = Buffer.from(b.data,'base64').subarray(0,32).toString('hex'); } catch(e){} }\nreturn {json: {\n  ...meta,\n  processing_mode: 'attachment_' + (meta.attachment_extension || 'unknown'),\n  extracted_attachment_text: 'Onbekend bestandstype. Extensie: ' + meta.attachment_extension + '. Mime: ' + meta.attachment_mime_type,\n  attachment_summary: 'Generiek onbekend bijlagetype.',\n}};\n"
+      },
+      "id": "201d042e-0f6d-4379-9f7f-2000243b29e4",
+      "name": "Universal Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7824,
+        19504
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst items = $input.all();\nif (!items.length) return [{json: {attachment_count: 0, processing_mode: 'mail_only'}}];\nconst first = items[0].json || {};\nconst attachments = items.map(({json:j}) => ({\n  name: j.attachment_name || '',\n  extension: j.attachment_extension || '',\n  processing_mode: j.processing_mode || '',\n  summary: j.attachment_summary || '',\n  extracted_text: String(j.extracted_attachment_text || '').slice(0, 15000),\n}));\nconst combinedText = attachments.map((a,i) =>\n  '--- BIJLAGE ' + (i+1) + ': ' + a.name + ' (' + a.extension + ') ---\\n' + a.summary + '\\n' + a.extracted_text\n).join('\\n\\n').slice(0, 120000);\nreturn [{json: {\n  ...first,\n  attachment_count: attachments.length,\n  processing_mode: attachments.length === 1 ? attachments[0].processing_mode : 'mail_with_multiple_attachments',\n  extracted_attachment_text: combinedText,\n  attachment_summary: attachments.map(a=>a.name + ': ' + a.summary).join('\\n'),\n}}];\n"
+      },
+      "id": "3e12f8ec-75cd-4ae6-b147-e3b90c6c0338",
+      "name": "Aggregate Attachment Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8304,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst store = $getWorkflowStaticData('global');\nconst memory = store.qargoMailMemory || [];\nconst customers = store.knownCustomers || {};\nconst customerSamples = store.customerSamples || {};\nconst learnings = store.aiLearnings || [];\n\nconst senderDomain = String(d.original_sender_address || d.from_address || '').split('@').pop().toLowerCase();\n\n// Recent activity summary\nconst recentMemory = memory.slice(-5).map(m =>\n  (m.saved_at || '').slice(5, 10) + ' ' + (m.sender_domain || '?') + ':' + (m.operation || '?')\n).join('\\n');\n\n// Per-sender successful sample (last 1 successful Qargo payload from this sender)\nconst senderSample = customerSamples[senderDomain] || null;\nlet sampleText = '';\nif (senderSample && senderSample.payload) {\n  try {\n    const compact = {\n      customer: senderSample.payload.customer?.name,\n      order_identifier: senderSample.payload.order_identifier,\n      customer_reference_number: senderSample.payload.customer_reference_number,\n      pickup: senderSample.payload.consignments?.[0]?.pickup_stop?.location,\n      delivery: senderSample.payload.consignments?.[0]?.delivery_stop?.location,\n      goods: senderSample.payload.consignments?.[0]?.goods?.[0],\n    };\n    sampleText = 'LAATSTE GOED VERWERKTE ORDER VAN DEZE AFZENDER:\\n' + JSON.stringify(compact, null, 1);\n  } catch (e) {}\n}\n\n// Learnings from feedback mails (last 5)\nconst learningsText = learnings.slice(-5).map(l => l.date + ': ' + (l.feedback || '').slice(0, 120)).join('\\n');\n\nreturn {\n  json: {\n    ...d,\n    memory_context: recentMemory || '',\n    known_customers: Object.keys(customers).join(',') || '',\n    memory_count: memory.length,\n    ai_learnings: learningsText,\n    sender_sample: sampleText,\n    sender_domain: senderDomain,\n  }\n};\n"
+      },
+      "id": "237eceea-c86d-4cba-9db9-c2f38cb60755",
+      "name": "Load Memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8544,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nfunction clean(s) {\n  return String(s || '')\n    .replace(/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]/g, '')\n    .replace(/\\uFEFF/g, '').replace(/\\u0000/g, '');\n}\nconst isStructured = ['attachment_xml', 'attachment_xlsx'].includes(d.processing_mode);\nconst attachLimit = isStructured ? 18000 : 6000;\nconst mailLimit = 1500;\nconst mailText = clean(d.mail_text || d.mail_body_preview || '').slice(0, mailLimit);\nconst attachText = clean(d.extracted_attachment_text || '').slice(0, attachLimit);\n\nconst memorySection = d.memory_count > 0\n  ? `\\n## RECENT\\n${clean(d.memory_context || '').slice(0, 300)}` : '';\nconst sampleSection = d.sender_sample\n  ? `\\n## VORIGE GELUKTE ORDER VAN DEZE AFZENDER (gebruik als referentie voor structuur)\\n${clean(d.sender_sample).slice(0, 2000)}` : '';\nconst learningsText = clean(d.ai_learnings || '').split('\\n').slice(-5).join('\\n');\n\nconst userPrompt = `Van: ${clean(d.original_sender_address || d.from_address || '?')}\nOnderwerp: ${clean(d.mail_subject || '?')}\nBijlage: ${clean(d.attachment_name || 'geen')} (${d.attachment_extension || '-'})${memorySection}${sampleSection}\n\n## LESSEN UIT FEEDBACK\n${learningsText || 'geen'}\n\n## MAIL\n${mailText || '(leeg)'}\n\n## BIJLAGE\n${attachText || '(geen)'}\n\nBESCHIKBARE TOOLS:\n- structured_parser_tool: parse XML/JSON/XLSX gestructureerd\n- address_lookup: zoek ontbrekende adressen op via OpenStreetMap (gebruik wanneer adres/postcode/land ontbreekt)`;\n\nreturn { json: { ...d, ai_user_prompt: userPrompt } };\n"
+      },
+      "id": "3cae2dc9-32e1-4ccf-b24d-475880969d21",
+      "name": "Build AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8784,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.ai_user_prompt }}",
+        "options": {
+          "systemMessage": "REGELS: 1) VERZIN NOOIT DATA - alleen wat in mail/bijlage staat. 2) null=verboden, gebruik \"\" of 0. 3) Twijfel=manual_review:true. 4) Geen packaging_size/duration.\n\nJe bent orderinvoer medewerker van Agro World transport. Lees de mail, begrijp wat het is, vul Qargo in.\n\nMAIL TYPE:\n- Order met bijlage -> CREATE\n- Storno/cancel -> DELETE  \n- Wijziging -> CREATE (auto-update)\n- Gesprek/bedankt/out-of-office -> IGNORE\n\nKLANTEN & VELDMAPPING:\n\n[XML] FN Global Meat (@fnglobalmeat) / Carnimex (@carnimex.nl) / Tulling (@tm-import.nl):\nVFPData XML. BELANGRIJK: meerdere <query> met ZELFDE so_hdr_ord_nr = 1 ORDER met 1 GOODS item!\nso_hdr_ord_nr=order_identifier+customer_reference_number+pickup_ref (=Carnimex ref)\nso_hdr_comment1=delivery_stop.reference_number (=Klant ref, NIET cust_ref!)\nc9_load=pickup_date, c9_unload=del_date, c9_coldoms=pickup_name, acct_name=del_name, address1=del_address, city=del_city, post_code=del_postal(D-46149->46149,country=DE), country=del_country\nCombineer alle query records tot 1 goods item:\n- description: alle art_code+art_desc1 onder elkaar met \\n ertussen\n- quantity: c9_ap (totaal pallets)\n- total_weight_kg: som van alle ord_qty\n- colli: som van alle tot_colli (=kartons/dozen, NIET gewicht!). Als geen kartons vermeld → colli=0\n- packaging: c9_tpl, temperature: c9_temp (van eerste record)\nc9_lco=pickup_note, c9_vvopm=delivery_note\n\n[XLSX/PDF] Tonnies/Weidemark/Tevex (@tevex.de/@toennies.de/@toennies.dk):\nKRITIEK: Elke rij = 1 APARTE order met 1 goods item! NOOIT rijen combineren!\nPickup per prefix: 1005=Weidemark Soegel/DE, 1000=Toennies Lebensmittel/Rheda-Wiedenbrueck/DE, 2000=Toennies Rind/Badbergen/DE, 3000=Tillman/Rheda-Wiedenbrueck/DE, 4000=Toennies Convenience/Rheda-Wiedenbrueck/DE\nPer rij: KommNr(J)=order_identifier+pickup_ref, Externe_Belegnr(K)=cust_ref+del_ref, BelVonDat(D)=pickup_date, EntBisDat(C)=del_date, EntBisZeit(B)=del_note(\"Lostijd: HH:MM\"), EmpName1(G)=del_name, Strasse(I)=del_address, EmpfangerPLZ(F)=del_postal(4cijfers=DK,5=DE), EmpOrt(H)=del_city, Pal.Anzahl(M)=goods.quantity, TatsGew(L)=goods.weight, LM_Art(N)=packaging(Kunststoff=EWP,Big Box=Big Block,HOLZ=EURO,BLOK=BLOK,Leergut gemischt=DOLAV), Artikelmerkmal(E)=description+temp, Tour(A)=pickup_note(\"Tour: 0780\"), Rechnung an(P)=customer.name, Bemerkung(Q): Storno=DELETE, NEU=in note\n\n[XLSX] Ekro (@ekro.nl): customer=\"Ekro\", Verladen naam=temp(Grolleman=Frozen,ESA=Ultra Fresh,Ekro=Fresh), __EMPTY_1=del_name, __EMPTY_3=del_address, __EMPTY_4=del_postal, __EMPTY_5=del_city\n\n[XLS] Coomans (@ctimport.nl): customer=\"Coomans Trade Import BV\", labels in __EMPTY_13\n\n[XLSX] Vion (@vionfood.com): customer=\"Vion Enschede\", kolommen: customer_reference_number, order_reference_number, pickup_data(ddmmyyyy), pickup_name/full_adress/postcode/city/country, delivery_name/full_adress/postcode/city/country, quantity, weight_kg, packaging_type, good_custom_field_temperature\nLand: Nederland=NL, Denemarken=DK, Duitsland=DE. Postcode \"DK-4241 Vemmelev\"->postal=4241,city=Vemmelev\n\n[PDF] ThermoTraffic (@thermotraffic.com):\ncustomer.name = \"Thermotraffic B.V.\" (of \"Thermotraffic GmbH\" als DE afzender)\nThermoTraffic is ALTIJD de klant (betalende partij), ook als pickup bij ThermoTraffic is.\nPDF velden: Ons referentie nr=order_identifier+customer_reference_number, Laaddag/Tijd=pickup_date+note, Laadplaats=pickup_location, Laadreferentie=pickup_ref, Colli aantal=colli, Gewicht=weight, Pallet aantal/soort=quantity+packaging, Lading=description, Transporttemperatuur=temperature, Losdatum/Tijd=delivery_date, Losadres=delivery_location, Losreferentie=delivery_ref\nPackaging: Check ALTIJD de \"Vrachtprijs\" regel voor het echte type! \"blokpallet tarief\"=BLOK, \"europallet\"=EURO. \"Industrial Pallets\" in pallet aantal/soort is NIET het packaging type - kijk naar vrachtprijs.\n\"Ruilen: Nee/Ja\" is alleen info of emballage geruild moet worden, NIET relevant voor de order. Negeer dit veld.\nTemperatuur uit tekst: \"Minus 25\"=\"Frozen (-18C / -30C)\", check de graden\n\n[PDF] WETRALOG (@wetralog.de):\ncustomer.name = \"WETRALOG GmbH\"\nHerkenning: \"Transportauftrag\", \"Ladestellen:\", \"Entladestellen:\"\norder_identifier = nummer na \"Transportauftrag - \" (bv 2026012345)\n\nSTRUCTUUR: Ladestellen: sectie heeft pickup stops, Entladestellen: sectie heeft delivery stops.\nLocatie regel: \"1 WFL Werk Coesfeld Stockum 2 D 48653 Coesfeld\" = volgnr + naam+straat + landprefix + postcode + stad\nLand: \"D\"=DE, \"DK\"=DK, \"NL\"=NL, \"BE\"=BE\nDatum/tijd regel: \"07.04.2026 15:00 - 15:00\" -> date=2026-04-07, time_window={start_time:\"15:00\",end_time:\"15:00\"}, note=\"Laadtijd: 15:00 - 15:00\"\n\nPICKUP goods regel: \"81565124 H1EUROPAL 12 12,00 SP 4.643,20 kg Frisch 0°C\"\n= reference + packaging_code + quantity + pallet_spaces + SP + weight + kg + temperatuur\nDELIVERY goods regel: \"81565124 Entladeeinheiten: 12 12,00 SP 4.643,20 kg\"\n= reference + aantal + pallet_spaces + weight\n\nKRITIEK: Match pickup-goods en delivery-goods op REFERENCE nummer (bv 81565124)!\nPer gematchte reference = 1 APARTE order. Dus 1 pickup met 2 goods (refs 81565124 en 81565147) \n+ 2 deliveries met zelfde refs = 2 aparte Qargo orders.\nZet reference in pickup_stop.reference_number EN delivery_stop.reference_number.\n\nPACKAGING codes: H1EUROPAL=H1, WTLDOLAVHB=DOLAV, EUROPAL=EURO, CHEP=CHEP, EWP=EWP\nTEMPERATUUR: \"Frisch 0°C\" of \"Frisch\" met 0-3°C -> \"Ultra Fresh (0C / 3C)\", \"Frisch\" zonder graden -> \"Fresh (4C / 7C)\", \"Frozen/Tiefkühl/-18\" -> \"Frozen (-18C / -30C)\"\n\n[Mail+PDF] Transport Herve, Family Beef, Fuite Veal, Goedegebuur, Ameco\n\nEMBALLAGE: Bij leergut/tauschen/ruilen: product=\"Emballage H1\"/\"Emballage Dolav\"/\"Emballage E2\"/\"Emballage CKW\"/\"Emballage EM21\"\n\nTEMP: frozen/tiefkuhl/-18=\"Frozen (-18C / -30C)\", ultrafrisch/0-3=\"Ultra Fresh (0C / 3C)\", frisch/4-7=\"Fresh (4C / 7C)\", thermo/8-20=\"Thermo (8C / 20C)\", anders=\"Ambient ( Geen Temp)\"\n\nPACKAGING: EURO/EUR/EP/PLT/HOLZ=\"EURO\", CHEP, DOLAV, BLOK, BB=\"Big Block\", EWP/KUNST=\"EWP\", blokpallet/blok=\"BLOK\", ONEWAY=\"ONEWAY ( Eenmalige pallet)\", PAL=\"Pallet\"\n\nREGELS: quantity=0 maar weight bekend -> ceil(weight/700). Weight, description en packaging_type zijn OPTIONEEL. Als packaging onbekend, gebruik \"Pallet\" als default. Alleen als ZOWEL quantity ALS weight 0/leeg zijn -> manual_review:true. Geen delivery_date -> service_level:{\"code\":\"AB\"} op payload top-level (naast transport_service).\n\n\nTIJDVENSTERS: Als laad/lostijd vermeld (bijv \"voor 15:00\", \"08:00-16:00\", \"rond 7-8 uur\"):\nZet in pickup_stop/delivery_stop.time_window: {\"start_time\":\"HH:MM\",\"end_time\":\"HH:MM\"}\nEN zet tijd ook in note. \"voor 15:00\"→00:00-15:00, \"08:00\"→08:00-08:00, \"08:00-16:00\"→08:00-16:00, \"na 12:00\"→12:00-23:59, \"rond 7-8\"→07:00-08:00. Geen tijd=geen time_window (weglaten).\n\nOUTPUT: Alleen JSON. 1 order=object, N orders=array.\n{\"classification\":{\"operation\":\"CREATE\",\"manual_review\":false,\"confidence\":0.95,\"reason\":\"\",\"customer_flow\":\"\",\"is_new_customer\":false,\"new_customer_domain\":\"\",\"new_customer_name\":\"\"},\"qargo_payload\":{\"transport_service\":{\"name\":\"Transport\",\"code\":\"1\"},\"transport_network\":{\"name\":\"Agro World\"},\"customer_reference_number\":\"\",\"neutral_order_type\":\"NO_NEUTRAL_ORDER\",\"operation\":\"CREATE\",\"order_identifier\":\"\",\"customer\":{\"name\":\"\"},\"consignments\":[{\"pickup_stop\":{\"activity_label\":\"PICKUP\",\"note\":\"\",\"date\":\"YYYY-MM-DD\",\"time_window\":{\"start_time\":\"HH:MM\",\"end_time\":\"HH:MM\"},\"reference_number\":\"\",\"location\":{\"name\":\"\",\"address\":\"\",\"city\":\"\",\"country\":\"\",\"postal_code\":\"\"}},\"delivery_stop\":{\"activity_label\":\"DELIVERY\",\"note\":\"\",\"date\":\"YYYY-MM-DD\",\"time_window\":{\"start_time\":\"HH:MM\",\"end_time\":\"HH:MM\"},\"reference_number\":\"\",\"location\":{\"name\":\"\",\"address\":\"\",\"city\":\"\",\"country\":\"\",\"postal_code\":\"\"}},\"goods\":[{\"quantity\":0,\"description\":\"\",\"total_weight_kg\":0,\"packaging_type\":{\"name\":\"EURO\"},\"custom_fields\":{\"colli\":0,\"temperature1\":\"Ambient ( Geen Temp)\"}}]}]},\"normalized_order\":{\"order_identifier\":\"\",\"customer_name\":\"\",\"pickup_date\":\"\",\"delivery_date\":\"\",\"pickup_location\":\"\",\"delivery_location\":\"\",\"missing_fields\":[]}}"
+        }
+      },
+      "id": "3bbb908e-a2bf-4411-8f39-ba431237a996",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        8976,
+        18896
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 16384
+        }
+      },
+      "id": "e539fb4e-2c3b-4478-8e68-061182883f75",
+      "name": "Claude Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        8976,
+        19104
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "DfsY5RuAzhDs1zPC",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Parseer gestructureerde bijlage (XML VFPData, JSON, XLSX) naar order velden",
+        "jsCode": "\nfunction clean(v) { return String(v == null ? '' : v).trim(); }\nfunction toNum(v) { const n = parseFloat(String(v || '').replace(',', '.').replace(/[^\\d.-]/g, '')); return isFinite(n) ? n : 0; }\n\nfunction normDate(v) {\n  const t = clean(v).replace(/\\./g, '-').replace(/\\//g, '-');\n  if (!t) return '';\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) return t;\n  const dmy = t.match(/^(\\d{2})-(\\d{2})-(\\d{4})$/);\n  if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;\n  // Try Date parsing as fallback\n  try { const d = new Date(t); if (!isNaN(d)) return d.toISOString().slice(0, 10); } catch(e) {}\n  return t;\n}\n\nfunction mapTemp(v) {\n  const t = clean(v).toLowerCase();\n  if (!t) return 'Ambient ( Geen Temp)';\n  if (t.includes('ultrafrisch') || t.includes('ultra fresh')) return 'Ultra Fresh (0C / 3C)';\n  if (t.includes('tiefk') || t.includes('frozen') || t.includes('vries')) return 'Frozen (-18C / -30C)';\n  if (t.includes('frisch') || t.includes('fresh') || t.includes('gekoeld')) return 'Fresh (4C / 7C)';\n  if (t.includes('thermo')) return 'Thermo (8C / 20C)';\n  const m = t.match(/-?\\d+(\\.\\d+)?/);\n  if (!m) return 'Ambient ( Geen Temp)';\n  const n = parseFloat(m[0]);\n  if (n <= -18) return 'Frozen (-18C / -30C)';\n  if (n >= 0 && n <= 3) return 'Ultra Fresh (0C / 3C)';\n  if (n >= 4 && n <= 7) return 'Fresh (4C / 7C)';\n  if (n >= 8 && n <= 20) return 'Thermo (8C / 20C)';\n  return 'Ambient ( Geen Temp)';\n}\n\nfunction mapPkg(v) {\n  const k = clean(v).toUpperCase();\n  const map = {\n    'EURO':'EURO','EUR':'EURO','EP':'EURO','PLT':'EURO','HOLZ':'EURO',\n    'CHEP':'CHEP','DOLAV':'DOLAV','BLOK':'BLOK',\n    'BB':'Big Block','BIGBOX':'Big Block','BIG BLOCK':'Big Block',\n    'KUNST':'EWP','EWP':'EWP','KUNSTSTOFF':'EWP',\n    'ONEWAY':'ONEWAY ( Eenmalige pallet)',\n    'PAL':'Pallet','PALLET':'Pallet',\n    'H1':'H1','CBL 11':'CBL 11','CBL 17':'CBL 17','CKW':'CKW'\n  };\n  return map[k] || v || 'EURO';\n}\n\nfunction tryParse(t) { try { return JSON.parse(t); } catch(e) { return null; } }\n\nfunction parseVFP(xml) {\n  if (!/<VFPData/i.test(xml)) return null;\n  const recs = [];\n  const re = /<query>([\\s\\S]*?)<\\/query>/gi;\n  let m;\n  while ((m = re.exec(xml)) !== null) {\n    const fields = {};\n    const fr = /<([A-Za-z0-9_:-]+)>([\\s\\S]*?)<\\/\\1>/g;\n    let fm;\n    while ((fm = fr.exec(m[1])) !== null) {\n      fields[fm[1]] = fm[2].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/<!\\[CDATA\\[/, '').replace(/\\]\\]>/, '').trim();\n    }\n    if (Object.keys(fields).length > 0) recs.push(fields);\n  }\n  if (!recs.length) return null;\n\n  // Group by order number\n  const grouped = {};\n  for (const r of recs) {\n    const nr = r.so_hdr_ord_nr || 'UNKNOWN';\n    if (!grouped[nr]) grouped[nr] = [];\n    grouped[nr].push(r);\n  }\n\n  return Object.entries(grouped).map(([nr, rows]) => {\n    const f = rows[0];\n    return {\n      order_identifier: nr,\n      customer_reference_number: f.so_hdr_comment1 || nr,\n      pickup_date: normDate(f.c9_load || f.vm_load),\n      delivery_date: normDate(f.c9_unload || f.vm_unload),\n      pickup_location: f.c9_coldoms || f.vm_coldoms || '',\n      delivery_name: f.acct_name || f.c9_invacct || '',\n      delivery_address: f.address1 || '',\n      delivery_city: f.city || '',\n      delivery_country: f.country || '',\n      delivery_postal: f.post_code || '',\n      goods: rows.map(r => ({\n        description: [r.art_code, r.art_desc1].filter(Boolean).join(' '),\n        colli: toNum(r.tot_colli),\n        weight: toNum(r.ord_qty),\n        packaging: mapPkg(r.c9_tpl || r.vm_tpl),\n        temperature: mapTemp(r.article_comment1 || r.so_dtl_temperature || r.vm_temp),\n      })),\n      note: f.c9_lco || f.vm_lco || '',\n      reference: f.c9_rn || f.t_recid || '',\n      pallets: toNum(f.c9_ap || f.vm_ap),\n    };\n  });\n}\n\n// Main entry\nvar inp = typeof query === 'string' ? tryParse(query) || {attachment_text: query} : (query || {});\nvar txt = clean(inp.attachment_text);\n\nif (/<VFPData/i.test(txt)) {\n  var vfp = parseVFP(txt);\n  if (vfp) return JSON.stringify(vfp);\n}\n\nvar parsed = tryParse(txt);\nif (parsed && typeof parsed === 'object') return JSON.stringify(parsed);\n\nreturn JSON.stringify({raw_text: txt.slice(0, 8000), note: 'Niet structureel parseerbaar - AI gebruikt ruwe tekst'});\n",
+        "specifyInputSchema": true,
+        "jsonSchemaExample": "{\"attachment_name\":\"order.xml\",\"attachment_text\":\"<VFPData>...\"}"
+      },
+      "id": "86a21b71-2ca6-4407-b55d-8e96caf76fab",
+      "name": "Structured Parser Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        9120,
+        19152
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst raw = String($json.output || $json.text || $json.response || '').trim();\nconst upstream = $json || {};\n\nlet parsed = null;\nconst patterns = [/```json\\s*([\\s\\S]*?)```/, /```\\s*([\\s\\S]*?)```/, /([\\[{][\\s\\S]*[\\]}])/];\n\nfor (const pattern of patterns) {\n  const match = raw.match(pattern);\n  if (!match) continue;\n  let jsonStr = (match[1] || match[0]).trim();\n  \n  try { const c = JSON.parse(jsonStr); if (c && typeof c === 'object') { parsed = c; break; } } catch(e) {}\n  \n  // Truncated array recovery: extract all complete objects\n  if (jsonStr.startsWith('[')) {\n    const objects = [];\n    let depth = 0, start = -1;\n    for (let i = 0; i < jsonStr.length; i++) {\n      if (jsonStr[i] === '{') { if (depth === 0) start = i; depth++; }\n      if (jsonStr[i] === '}') { depth--; if (depth === 0 && start >= 0) { objects.push(jsonStr.slice(start, i + 1)); start = -1; } }\n    }\n    if (objects.length > 0) {\n      try { parsed = objects.map(o => JSON.parse(o)); break; } catch(e) {}\n    }\n  }\n}\n\nif (!parsed) {\n  try { const c = JSON.parse(raw); if (c && typeof c === 'object') parsed = c; } catch(e) {}\n}\n\nif (!parsed) {\n  return [{json: {\n    ...upstream,\n    classification: { operation: 'MANUAL_REVIEW', manual_review: true, confidence: 0,\n      reason: 'AI gaf geen geldige JSON. Raw: ' + raw.slice(0, 500),\n      customer_flow: '', is_new_customer: false, new_customer_domain: '', new_customer_name: '' },\n    qargo_payload: '', normalized_order: {order_identifier: '', customer_name: '', missing_fields: ['all']},\n    ai_raw_output: raw.slice(0, 2000),\n  }}];\n}\n\nfunction sanitize(obj) {\n  if (obj === null || obj === undefined) return '';\n  if (typeof obj !== 'object') return obj;\n  if (Array.isArray(obj)) return obj.map(sanitize);\n  const result = {};\n  const numKeys = new Set(['quantity', 'total_weight_kg', 'colli', 'confidence']);\n  for (const [key, val] of Object.entries(obj)) {\n    if (val === null || val === undefined) { result[key] = numKeys.has(key) ? 0 : ''; }\n    else { result[key] = sanitize(val); }\n  }\n  return result;\n}\n\nfunction str(val) {\n  if (val === null || val === undefined) return '';\n  if (typeof val === 'string') return val;\n  if (typeof val === 'object') { try { return JSON.stringify(val); } catch(e) {} }\n  return String(val);\n}\n\nconst orders = Array.isArray(parsed) ? parsed : [parsed];\nreturn orders.map((order, index) => {\n  const s = sanitize(order);\n  const cls = {...(s.classification || {})};\n  \n  cls.reason = str(cls.reason);\n  cls.customer_flow = str(cls.customer_flow);\n  cls.new_customer_domain = str(cls.new_customer_domain);\n  cls.new_customer_name = str(cls.new_customer_name);\n  cls.operation = str(cls.operation) || 'MANUAL_REVIEW';\n  if (typeof cls.confidence === 'number' && cls.confidence < 0.5 && cls.operation !== 'IGNORE') {\n    cls.operation = 'MANUAL_REVIEW'; cls.manual_review = true;\n  }\n  cls.manual_review = cls.manual_review || cls.operation === 'MANUAL_REVIEW';\n  cls.is_new_customer = cls.is_new_customer || false;\n  if (cls.is_new_customer && (cls.confidence || 0) < 0.8) cls.is_new_customer = false;\n\n  const payload = s.qargo_payload;\n  if (payload && payload.consignments) {\n    for (const c of payload.consignments) {\n      if (c.goods) {\n        for (const g of c.goods) {\n          if ((!g.quantity || g.quantity === 0) && g.total_weight_kg > 0) {\n            g.quantity = Math.ceil(g.total_weight_kg / 700);\n          }\n        }\n      }\n      // Empty date: DELETE the field so Qargo doesn't reject it\n      if (c.delivery_stop && (!c.delivery_stop.date || c.delivery_stop.date === '')) {\n        delete c.delivery_stop.date;\n        if (!payload.service_level) payload.service_level = {\"code\": \"AB\"};\n      }\n      if (c.pickup_stop && (!c.pickup_stop.date || c.pickup_stop.date === '')) {\n        delete c.pickup_stop.date;\n      }\n      if (c.pickup_stop) delete c.pickup_stop.duration;\n      // Remove empty time_windows (if AI sent them without actual times)\n      if (c.pickup_stop?.time_window) {\n        if (!c.pickup_stop.time_window.start_time && !c.pickup_stop.time_window.end_time) {\n          delete c.pickup_stop.time_window;\n        }\n      }\n      if (c.delivery_stop) delete c.delivery_stop.duration;\n      if (c.delivery_stop?.time_window) {\n        if (!c.delivery_stop.time_window.start_time && !c.delivery_stop.time_window.end_time) {\n          delete c.delivery_stop.time_window;\n        }\n      }\n    }\n  }\n  \n  // Fix service_level format: always {\"code\": \"AB\"}, never {\"name\": \"AB\"}\n  if (payload && payload.service_level) {\n    if (typeof payload.service_level === 'string') {\n      payload.service_level = {\"code\": payload.service_level};\n    } else if (payload.service_level.name && !payload.service_level.code) {\n      payload.service_level = {\"code\": payload.service_level.name};\n      delete payload.service_level.name;\n    }\n  }\n\n  // Goods validation: quantity OR weight must be filled, not both empty\n  if (payload && payload.consignments && cls.operation !== 'IGNORE' && cls.operation !== 'DELETE') {\n    for (const c of payload.consignments) {\n      if (c.goods) {\n        const allEmpty = c.goods.every(g => (!g.quantity || g.quantity === 0) && (!g.total_weight_kg || g.total_weight_kg === 0));\n        if (allEmpty) {\n          cls.operation = 'MANUAL_REVIEW';\n          cls.manual_review = true;\n          cls.reason = (cls.reason || '') + ' Geen quantity en geen gewicht ingevuld.';\n        }\n      }\n    }\n  }\n\n  return {json: {\n    message_id: upstream.message_id || '', email_id: upstream.email_id || '',\n    unique_key: upstream.unique_key || '', from_address: upstream.from_address || '',\n    original_sender_address: upstream.original_sender_address || '',\n    mail_subject: upstream.mail_subject || '', mail_text: (upstream.mail_text || '').slice(0, 1000),\n    mail_body_html: upstream.mail_body_html || '',\n    attachment_name: upstream.attachment_name || '', attachment_extension: upstream.attachment_extension || '',\n    processing_mode: upstream.processing_mode || '', received_at: upstream.received_at || '',\n    classification: cls, qargo_payload: payload || '',\n    normalized_order: s.normalized_order || {},\n    ai_raw_output: raw.slice(0, 2000), order_index: index, total_orders_in_mail: orders.length,\n  }};\n});\n"
+      },
+      "id": "3845d2dd-1a40-4b20-b94f-2156b140f89f",
+      "name": "Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9264,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.classification.is_new_customer }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "7cda8658-b7cd-4750-9b0c-d10b78b68c3a",
+      "name": "New Customer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9536,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst store = $getWorkflowStaticData('global');\nif (!store.knownCustomers) store.knownCustomers = {};\n\nconst domain = d.classification?.new_customer_domain || d.original_sender_address?.split('@')[1] || 'unknown';\nconst name = d.classification?.new_customer_name || domain;\n\nif (!store.knownCustomers[domain]) {\n  store.knownCustomers[domain] = { domain, name, first_seen: new Date().toISOString(), mail_count: 1 };\n} else {\n  store.knownCustomers[domain].mail_count++;\n}\n\nreturn {json: {\n  ...d,\n  classification: {\n    ...d.classification,\n    operation: 'MANUAL_REVIEW',\n    manual_review: true,\n    reason: `Nieuwe klant (${name}). Naar Review.`,\n  },\n}};\n"
+      },
+      "id": "a0f1a405-6d7a-4ec7-b843-a3d69a916073",
+      "name": "Register New Customer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9840,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ String($json.classification?.manual_review) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.classification?.operation }}",
+              "rightValue": "MANUAL_REVIEW",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "leftValue": "={{ $json.classification?.operation }}",
+              "rightValue": "IGNORE",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "676b909a-f892-473c-9759-4243dce5da4b",
+      "name": "Manual Review Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9888,
+        19056
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.classification.operation }}",
+              "rightValue": "IGNORE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "abefd790-ad19-4ccd-a008-3a5c0a7271ec",
+      "name": "Ignore Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        10528,
+        19024
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.qargo.com/v1/orders/order/upload",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.qargo_payload }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 90000
+        }
+      },
+      "id": "139a9412-165d-4e0c-b5ca-3f25af67dfc4",
+      "name": "Upload to Qargo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        10224,
+        18704
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "F7BiRvhFGY6cKMyD",
+          "name": "Qargo_Api_Key"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst orig = $('Parse AI Result').first().json;\nconst resp = $json || {};\n\nconst uploadId = String(resp.upload_id || resp.id || '').trim();\nconst status = String(resp.upload_status || resp.status || '').toUpperCase();\nconst accepted = !!uploadId && !['ERROR', 'REJECTED', 'FAILED'].includes(status);\nconst errorMsg = [resp.detail, resp.message, resp.error].filter(Boolean).join(' | ');\n\nreturn {json: {\n  ...orig,\n  qargo_submission: {\n    accepted,\n    upload_id: uploadId,\n    upload_status: status || 'UNKNOWN',\n    raw_response: resp,\n  },\n  qargo_submission_ok: accepted,\n  classification: accepted ? orig.classification : {\n    ...orig.classification,\n    operation: 'MANUAL_REVIEW',\n    manual_review: true,\n    reason: errorMsg || 'Qargo upload mislukt',\n  },\n}};\n"
+      },
+      "id": "4d202021-8ad9-4e60-9627-52aa6a93aebb",
+      "name": "Validate Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10464,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.qargo_submission_ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a13b3b6a-b06f-401d-8ca2-54b5ba2773e8",
+      "name": "Upload Accepted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        10704,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 15
+      },
+      "id": "4a3c5e23-777c-48a3-974f-f77da34408b7",
+      "name": "Wait for Import",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        10944,
+        18704
+      ],
+      "webhookId": "f76835df-dd2e-442b-8ecc-647a0567712a"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.qargo.com/v1/orders/order/upload/{{$json.qargo_submission.upload_id}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 90000
+        }
+      },
+      "id": "d3e26b09-355d-4fd3-a69b-1c231c6c84ab",
+      "name": "Get Import Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        11184,
+        18704
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "F7BiRvhFGY6cKMyD",
+          "name": "Qargo_Api_Key"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst orig = $('Validate Upload').first().json;\nconst resp = $json || {};\nconst status = String(resp.upload_status || '').toUpperCase();\nconst completed = !!resp.order_id;  // order_id exists = order created in Qargo = success\nconst failed = ['ERROR', 'REJECTED', 'FAILED', 'SKIPPED'].includes(status);\nconst inProgress = ['IN_PROGRESS', 'TODO', 'READY_TO_UPSERT', 'UPSERT_IN_PROGRESS'].includes(status);\n\n// Track retry count\nconst retryCount = (orig._retry_count || 0);\nconst maxRetries = 3;\nconst shouldRetry = inProgress && retryCount < maxRetries;\n\nreturn {json: {\n  ...orig,\n  _retry_count: retryCount + 1,\n  _should_retry: shouldRetry,\n  qargo_import_status: {\n    completed,\n    failed,\n    in_progress: inProgress,\n    status,\n    order_id: resp.order_id || '',\n    upload_id: resp.upload_id || orig.qargo_submission?.upload_id || '',\n  },\n  classification: completed ? orig.classification : {\n    ...orig.classification,\n    operation: shouldRetry ? orig.classification?.operation : 'MANUAL_REVIEW',\n    manual_review: shouldRetry ? (orig.classification?.manual_review || false) : true,\n    reason: failed ? 'Import mislukt: ' + status \n           : shouldRetry ? orig.classification?.reason \n           : 'Import niet voltooid na ' + maxRetries + ' pogingen (' + status + ')',\n  },\n}};\n"
+      },
+      "id": "0cff786b-8708-4e13-875b-2ca2bb0a18ef",
+      "name": "Finalize Import",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11424,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.qargo_import_status.completed }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json._should_retry }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "allMatchingOutputs": false
+        }
+      },
+      "id": "0450fef4-450c-429c-a2b8-c66104a258c5",
+      "name": "Import Status Check",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.1,
+      "position": [
+        11664,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst norm = $('Normalize Email').first().json;\nconst store = $getWorkflowStaticData('global');\n\nif (!Array.isArray(store.qargoMailMemory)) store.qargoMailMemory = [];\nif (!store.knownCustomers) store.knownCustomers = {};\nif (!store.customerSamples) store.customerSamples = {};\n\nconst sender = String(norm.original_sender_address || norm.from_address || '').toLowerCase();\nconst domain = sender.includes('@') ? sender.split('@').pop() : sender;\n\n// Update known customers\nif (domain && domain !== 'unknown') {\n  if (!store.knownCustomers[domain]) {\n    store.knownCustomers[domain] = {\n      domain,\n      name: d.normalized_order?.customer_name || domain,\n      first_seen: new Date().toISOString(),\n      mail_count: 0,\n      success_count: 0,\n    };\n  }\n  store.knownCustomers[domain].mail_count++;\n  store.knownCustomers[domain].last_seen = new Date().toISOString();\n  if (d.normalized_order?.customer_name) {\n    store.knownCustomers[domain].name = d.normalized_order.customer_name;\n  }\n}\n\n// Store successful Qargo upload as sender sample for future reference\nconst isSuccess = d.qargo_import_status?.completed === true && d.qargo_payload && typeof d.qargo_payload === 'object';\nif (isSuccess && domain) {\n  store.customerSamples[domain] = {\n    saved_at: new Date().toISOString(),\n    mapper_used: d.mapper_used || 'ai',\n    payload: d.qargo_payload,\n  };\n  if (store.knownCustomers[domain]) {\n    store.knownCustomers[domain].success_count = (store.knownCustomers[domain].success_count || 0) + 1;\n  }\n}\n\n// Store order memory\nstore.qargoMailMemory.push({\n  saved_at: new Date().toISOString(),\n  sender_domain: domain,\n  operation: d.classification?.operation || '',\n  order_id: d.normalized_order?.order_identifier || '',\n  customer: d.normalized_order?.customer_name || '',\n  success: isSuccess,\n  mapper: d.mapper_used || 'ai',\n});\n\nif (store.qargoMailMemory.length > 500) {\n  store.qargoMailMemory = store.qargoMailMemory.slice(-500);\n}\n\nreturn {\n  json: {\n    ...d,\n    message_id: d.message_id || norm.message_id || '',\n    unique_key: d.unique_key || norm.unique_key || '',\n    memory_saved: true,\n  }\n};\n"
+      },
+      "id": "3dad3b9a-fcdc-4d2d-97a1-b0effb4b244b",
+      "name": "Store Memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11904,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Pass upstream identity fields through so Mark Mail Read can find the message.\nconst d = $json;\nconst norm = $('Normalize Email').first().json;\nreturn {\n  json: {\n    ...d,\n    status: 'passthrough',\n    message_id: d.message_id || norm.message_id || '',\n    unique_key:  d.unique_key  || norm.unique_key  || '',\n    email_id:    d.email_id    || norm.message_id || '',\n    reason: d.classification?.reason || '',\n  }\n};"
+      },
+      "id": "65074073-c61f-4e19-9998-57857bcfa867",
+      "name": "Review Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10944,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id || $('Normalize Email').first().json.message_id }}",
+          "mode": "id"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAKeiJsAAA=",
+          "mode": "list",
+          "cachedResultName": "Review",
+          "cachedResultUrl": "https://outlook.office365.com/mail/AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC%2FTtETewAnAQALczwU7dLATZVMaWIXfj4GAAAKeiJsAAA%3D"
+        }
+      },
+      "id": "9a7c7bc5-4053-4384-8f5f-d150928c0606",
+      "name": "Move to Review",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        11184,
+        18896
+      ],
+      "webhookId": "0c64def8-0c44-40c7-aab7-f14037ce557c",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Pass upstream identity fields through so Mark Mail Read can find the message.\nconst d = $json;\nconst norm = $('Normalize Email').first().json;\nreturn {\n  json: {\n    ...d,\n    status: 'passthrough',\n    message_id: d.message_id || norm.message_id || '',\n    unique_key:  d.unique_key  || norm.unique_key  || '',\n    email_id:    d.email_id    || norm.message_id || '',\n    reason: d.classification?.reason || '',\n  }\n};"
+      },
+      "id": "13e4a028-f1b4-401e-aada-739091226d16",
+      "name": "Ignore Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11440,
+        19040
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "messageId": {
+          "mode": "id",
+          "__rl": true,
+          "value": "={{ $json.message_id || $json.email_id || $('Normalize Email').first().json.message_id }}"
+        },
+        "updateFields": {
+          "isRead": true
+        }
+      },
+      "id": "a4260890-7ef3-4db1-be28-dbdc91acd727",
+      "name": "Mark Mail Read",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        13552,
+        18880
+      ],
+      "alwaysOutputData": true,
+      "webhookId": "ba388245-8b4a-4642-9050-428c7d8f8c72",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst norm = $('Normalize Email').first().json;\nconst store = $getWorkflowStaticData('global');\n\nif (!Array.isArray(store.processedEmails)) store.processedEmails = [];\n\nconst key = String(d.unique_key || norm.unique_key || d.message_id || norm.message_id || '').trim();\nif (key && !store.processedEmails.includes(key)) {\n  store.processedEmails.push(key);\n  // Keep last 2000\n  if (store.processedEmails.length > 2000) {\n    store.processedEmails = store.processedEmails.slice(-2000);\n  }\n}\n\nreturn {json: {...d, tracked: !!key, total_processed: store.processedEmails.length}};\n"
+      },
+      "id": "dc1a079b-e082-4a5a-a715-98fee1d75459",
+      "name": "Track Processed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        13856,
+        18880
+      ]
+    },
+    {
+      "parameters": {
+        "content": "AGRO WORLD AI ORDER INTAKE V7.5.2\n\n=== FEATURES ===\n- AI orderinvoer (Claude Sonnet 4.5)\n- Alle klanten: XML/XLSX/PDF/mail\n- EML upload naar Qargo (COMMUNICATION)\n- Anti-hallucinatie & null-fix\n- quantity=0: weight/700 = pallets\n- Geen delivery_date: service_level AB\n- time_window bij laad/lostijden\n- Feedback learning systeem\n- Retry loop (3x 15s)\n- Mail routing naar klantmappen\n- Token-geoptimaliseerd prompt\n\n=== DOCUMENT UPLOAD ===\nNa import: Download EML → Fix Format →\nUpload naar /v1/webhook/document-import\nAuth: Basic Auth (Qargo_Document_Webhook)\nType: COMMUNICATION\nEnvironment: agroworld-b316a\nMatch: customer_reference_number + order UUID\n\n=== SETUP ===\n1. Claude: Anthropic credential\n2. Outlook: Microsoft Outlook\n3. Qargo Orders: OAuth2 (Qargo_Api_Key)\n4. Qargo Docs: Basic Auth (Qargo_Document_Webhook)\n5. Activeer workflow",
+        "height": 500,
+        "width": 800
+      },
+      "id": "e2be93d3-25a8-47ca-9763-aa11cd59c18e",
+      "name": "Note V7",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5952,
+        18080
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst norm = $('Normalize Email').first().json;\nconst sender = String(d.original_sender_address || norm.original_sender_address || norm.from_address || '').toLowerCase();\nconst domain = sender.includes('@') ? sender.split('@').pop() : sender;\nconst customerFlow = String(d.classification?.customer_flow || '').toLowerCase();\n\n// Domain -> Outlook folder mapping\nconst folderMap = {\n  // FN Global Meat\n  'fnglobalmeat.com': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfXAAA=',\n  'fnmeat.com': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfXAAA=',\n  // Ekro\n  'ekro.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfWAAA=',\n  // Tonnies / Weidemark / Tevex\n  'tevex.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfkAAA=',\n  'toennies.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfkAAA=',\n  'tonnies.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfkAAA=',\n  'toennies.dk': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfkAAA=',\n  'weidemark.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfkAAA=',\n  // Coomans / CTimport\n  'ctimport.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfVAAA=',\n  // Carnimex\n  'carnimex.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAADz1ZjAAA=',\n  // Tulling\n  'tm-import.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAADz1ZkAAA=',\n  // Goedegebuur\n  'goedegebuur.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAFTztCAAA=',\n  // Ameco\n  'ameco.nl': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAFTztBAAA=',\n  'ameco.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAFTztBAAA=',\n  // ThermoTraffic\n  'thermotraffic.com': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAFTztDAAA=',\n  // Vion\n  'vionfood.com': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAKeiJ3AAA=',\n  // Wetralog\n  'wetralog.de': 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAAFTztEAAA=',\n};\n\n// Also try customer_flow fallback\nconst flowMap = {\n  'fn_global_meat': folderMap['fnglobalmeat.com'],\n  'ekro': folderMap['ekro.nl'],\n  'tonnies': folderMap['tevex.de'],\n  'tonnies_tevex': folderMap['tevex.de'],\n  'tonnies_weidemark': folderMap['tevex.de'],\n  'weidemark': folderMap['tevex.de'],\n  'coomans': folderMap['ctimport.nl'],\n  'ctimport': folderMap['ctimport.nl'],\n  'carnimex': folderMap['carnimex.nl'],\n  'tulling': folderMap['tm-import.nl'],\n  'tulling_meat_import': folderMap['tm-import.nl'],\n  'goedegebuur': folderMap['goedegebuur.nl'],\n  'ameco': folderMap['ameco.nl'],\n  'thermotraffic': folderMap['thermotraffic.com'],\n  'wetralog': folderMap['wetralog.de'],\n  'vion': folderMap['vionfood.com'],\n  'vion_enschede': folderMap['vionfood.com'],\n};\n\n// Review folder als fallback\nconst reviewFolder = 'AAMkADIzYzQ5MjFhLWJmMjYtNGY0YS1hNGYyLTljZmU3ZDQzYTIwNQAuAAAAAACXCL1barMVTYC-TtETewAnAQALczwU7dLATZVMaWIXfj4GAAACzHfXAAA=';\n\nlet targetFolder = folderMap[domain] || flowMap[customerFlow] || reviewFolder;\nlet folderName = 'Review';\n\n// Determine folder name for logging\nconst nameMap = {\n  [folderMap['fnglobalmeat.com']]: 'FN Global Meat',\n  [folderMap['ekro.nl']]: 'Ekro',\n  [folderMap['tevex.de']]: 'Tonnies',\n  [folderMap['ctimport.nl']]: 'CTimport',\n  [folderMap['carnimex.nl']]: 'Carnimex',\n  [folderMap['tm-import.nl']]: 'Tulling',\n  [folderMap['goedegebuur.nl']]: 'Goedegebuur',\n  [folderMap['ameco.nl']]: 'Ameco',\n  [folderMap['thermotraffic.com']]: 'ThermoTraffic',\n  [folderMap['wetralog.de']]: 'Wetralog',\n  [folderMap['vionfood.com']]: 'Vionfood',\n};\nfolderName = nameMap[targetFolder] || 'Review';\n\nreturn {json: {\n  ...d,\n  target_folder_id: targetFolder,\n  target_folder_name: folderName,\n  routed_by_domain: domain,\n  message_id: d.message_id || norm.message_id || '',\n}};\n"
+      },
+      "id": "6a90539c-2039-4793-9c69-c6b96a708dd2",
+      "name": "Route Mail to Folder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        13040,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.message_id || $('Normalize Email').first().json.message_id }}",
+          "mode": "id"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $json.target_folder_id }}",
+          "mode": "id"
+        }
+      },
+      "id": "b828edd1-585b-47ef-a240-3dcb1a7cbb8e",
+      "name": "Move to Client Folder",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        13264,
+        18704
+      ],
+      "webhookId": "3a8ea93f-9035-409d-9e00-a5e6f54eca64",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_feedback }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4bf1c247-a265-4968-8f67-47fd662a819e",
+      "name": "Is Feedback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6512,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst d = $json;\nconst store = $getWorkflowStaticData('global');\n\nif (!Array.isArray(store.aiLearnings)) store.aiLearnings = [];\n\n// Store the feedback with context\nconst learning = {\n  date: new Date().toISOString().slice(0, 10),\n  from: d.from_address || '',\n  subject: d.mail_subject || '',\n  feedback: d.mail_text || d.mail_body_preview || '',\n};\n\n// Keep max 100 learnings\nstore.aiLearnings.push(learning);\nif (store.aiLearnings.length > 100) {\n  store.aiLearnings = store.aiLearnings.slice(-100);\n}\n\nreturn {json: {\n  ...d,\n  feedback_stored: true,\n  total_learnings: store.aiLearnings.length,\n  learning_summary: learning.feedback.slice(0, 200),\n}};\n"
+      },
+      "id": "56109ed4-e3e9-4a4e-99c3-cd09a1768c91",
+      "name": "Store Feedback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6704,
+        18912
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.microsoft.com/v1.0/me/messages/{{ $('Normalize Email').first().json.message_id }}/$value",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "microsoftOutlookOAuth2Api",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "93801445-bd79-4fd7-b48b-dbbc8115926c",
+      "name": "Download EML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        12080,
+        18704
+      ],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst custRef = $('Parse AI Result').first().json?.qargo_payload?.customer_reference_number\n  || $('Parse AI Result').first().json?.normalized_order?.order_identifier\n  || 'order';\nconst safeName = String(custRef).replace(/[^a-zA-Z0-9_.-]/g, '_');\n\nfor (const item of items) {\n  if (item.binary) {\n    const key = Object.keys(item.binary)[0];\n    if (key && item.binary[key]) {\n      item.binary[key].fileName = safeName + '-mail.eml';\n      item.binary[key].mimeType = 'message/rfc822';\n    }\n  }\n}\nreturn items;"
+      },
+      "id": "923e39cd-7c42-412c-bee2-9c6fa498b15b",
+      "name": "Fix EML Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12320,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.qargo.com/v1/webhook/document-import",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "message/rfc822"
+            },
+            {
+              "name": "X-Environment-Id",
+              "value": "agroworld-b316a"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "5c83b77e-cf54-4a2e-a006-c928a37e4e92",
+      "name": "Upload EML to Qargo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        12560,
+        18704
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "PddDsQLUVzkWmth4",
+          "name": "Authorization"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const orig = $('Store Memory').first().json;\nconst emlResp = $json || {};\nconst emlSuccess = !(emlResp.error || emlResp.statusCode >= 400);\n\nreturn {json: {\n  ...orig,\n  eml_upload: {\n    success: emlSuccess,\n    status_code: emlResp.statusCode || 200,\n    response: typeof emlResp.data === 'string' ? emlResp.data.slice(0, 200) : '',\n  },\n}};"
+      },
+      "id": "be93ef4a-6e38-4b25-89c0-9be4d842aec8",
+      "name": "Log EML Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12800,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ============================================================\n// TÖNNIES / WEIDEMARK / TEVEX DETERMINISTIC MAPPER\n// Input: aggregated attachment context (XLSX rows as JSON array)\n// Output: 1 Qargo payload per sheet row (each row = separate order)\n// ============================================================\nconst d = $json;\n\nfunction pick(row, ...candidates) {\n  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');\n  const keys = Object.keys(row);\n  for (const cand of candidates) {\n    const t = norm(cand);\n    const hit = keys.find(k => norm(k) === t);\n    if (hit && row[hit] !== '' && row[hit] != null) return row[hit];\n  }\n  return '';\n}\n\nfunction normDate(v) {\n  const s = String(v || '').trim();\n  if (!s) return '';\n  let m = s.match(/^(\\d{2})[.\\-\\/](\\d{2})[.\\-\\/](\\d{4})$/);\n  if (m) return `${m[3]}-${m[2]}-${m[1]}`;\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(s)) return s;\n  const n = parseFloat(s);\n  if (n > 40000 && n < 60000) {\n    const dt = new Date(Date.UTC(1899, 11, 30) + n * 86400000);\n    return dt.toISOString().slice(0, 10);\n  }\n  return '';\n}\nfunction normTime(v) {\n  const s = String(v || '').trim();\n  const m = s.match(/(\\d{1,2})[:.]?(\\d{2})/);\n  return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';\n}\nfunction mapPkg(v) {\n  const k = String(v || '').toLowerCase();\n  if (k.includes('kunst')) return 'EWP';\n  if (k.includes('big') || k.includes('block')) return 'Big Block';\n  if (k.includes('holz') || k.includes('euro')) return 'EURO';\n  if (k.includes('blok')) return 'BLOK';\n  if (k.includes('dolav') || k.includes('leergut')) return 'DOLAV';\n  if (k.includes('h1')) return 'H1';\n  return 'Pallet';\n}\nfunction mapTemp(v) {\n  const k = String(v || '').toLowerCase();\n  if (k.includes('ultra')) return 'Ultra Fresh (0C / 3C)';\n  if (k.includes('frozen') || k.includes('tiefk') || k.includes('-18') || k.includes('vries')) return 'Frozen (-18C / -30C)';\n  if (k.includes('frisch') || k.includes('fresh') || k.includes('gekoeld')) return 'Fresh (4C / 7C)';\n  if (k.includes('thermo')) return 'Thermo (8C / 20C)';\n  return 'Ambient ( Geen Temp)';\n}\nconst PREFIX = {\n  '1005': { name: 'Weidemark',            city: 'Soegel',            country: 'DE' },\n  '1000': { name: 'Tönnies Lebensmittel', city: 'Rheda-Wiedenbrück', country: 'DE' },\n  '2000': { name: 'Tönnies Rind',         city: 'Badbergen',         country: 'DE' },\n  '3000': { name: 'Tillman',              city: 'Rheda-Wiedenbrück', country: 'DE' },\n  '4000': { name: 'Tönnies Convenience',  city: 'Rheda-Wiedenbrück', country: 'DE' },\n};\n\n// Parse aggregated attachment text — it's a JSON string of XLSX rows\nlet rows = [];\ntry {\n  const parsed = JSON.parse(d.extracted_attachment_text || '[]');\n  // Can be array of arrays (multi-sheet) or array of objects\n  rows = Array.isArray(parsed) ? parsed.flat(Infinity).filter(r => r && typeof r === 'object' && !Array.isArray(r)) : [];\n} catch (e) {\n  rows = [];\n}\n\nconst out = [];\nlet orderIdx = 0;\n\nfor (const row of rows) {\n  const kommNr = String(pick(row, 'KommNr', 'Kommissionsnummer', 'Komm Nr', 'Komm.Nr')).trim();\n  if (!kommNr) continue;\n\n  const belegNr    = String(pick(row, 'Externe_Belegnr', 'ExterneBelegnr', 'Externe Belegnr', 'Belegnummer', 'Externe Belegnummer')).trim();\n  const prefix     = kommNr.split('-')[0] || kommNr.slice(0, 4);\n  const pickupLoc  = PREFIX[prefix] || { name: 'Tönnies', city: '', country: 'DE' };\n\n  const qty        = parseFloat(String(pick(row, 'Pal. Anzahl', 'Pal.Anzahl', 'PalAnzahl', 'Palettenanzahl', 'Anzahl')).replace(',', '.')) || 0;\n  const weight     = parseFloat(String(pick(row, 'TatsGew', 'Gewicht', 'Gew')).replace(',', '.')) || 0;\n  const pkg        = mapPkg(pick(row, 'LM_Art', 'LMArt', 'Ladungsträger', 'Verpackung'));\n  const desc       = String(pick(row, 'Artikelmerkmal', 'Ware', 'Warenbeschreibung')).trim();\n  const temp       = mapTemp(desc);\n\n  const pickupDate = normDate(pick(row, 'BelVonDat', 'Ladedatum', 'Abholdatum'));\n  const delDate    = normDate(pick(row, 'EntBisDat', 'Lieferdatum', 'Entladedatum'));\n  const delTime    = normTime(pick(row, 'EntBisZeit', 'Lieferzeit', 'Entladezeit'));\n  const tour       = String(pick(row, 'Tour')).trim();\n\n  const postal     = String(pick(row, 'EmpfängerPLZ', 'EmpfangerPLZ', 'EmpfaengerPLZ', 'PLZ')).trim();\n  const country    = postal.length === 4 ? 'DK' : 'DE';\n\n  const customer   = String(pick(row, 'Rechnung an', 'Rechnung_an', 'RechnungAn', 'Kunde', 'Rechnungsempfänger')).trim() || 'Tönnies';\n  const bemerk     = String(pick(row, 'Bemerkung', 'Hinweis')).toLowerCase();\n  const operation  = /storno|cancel|löschen|delete/.test(bemerk) ? 'DELETE' : 'CREATE';\n\n  const missing = [];\n  if (!pickupDate) missing.push('pickup_date');\n  if (!delDate)    missing.push('delivery_date');\n  if (!qty && !weight) missing.push('quantity_or_weight');\n\n  const payload = {\n    transport_service: { name: 'Transport', code: '1' },\n    transport_network: { name: 'Agro World' },\n    neutral_order_type: 'NO_NEUTRAL_ORDER',\n    operation,\n    order_identifier: kommNr,\n    customer_reference_number: kommNr,\n    customer: { name: customer },\n    ...(delDate ? {} : { service_level: { code: 'AB' } }),\n    consignments: [{\n      pickup_stop: {\n        activity_label: 'PICKUP',\n        ...(pickupDate ? { date: pickupDate } : {}),\n        reference_number: kommNr,\n        note: tour ? `Tour: ${tour}` : '',\n        location: {\n          name: pickupLoc.name, city: pickupLoc.city, country: pickupLoc.country,\n          address: '', postal_code: '',\n        },\n      },\n      delivery_stop: {\n        activity_label: 'DELIVERY',\n        ...(delDate ? { date: delDate } : {}),\n        reference_number: belegNr,\n        note: delTime ? `Lostijd: ${delTime}` : '',\n        ...(delTime ? { time_window: { start_time: delTime, end_time: delTime } } : {}),\n        location: {\n          name:        String(pick(row, 'EmpName1', 'Empfänger', 'Empfaenger', 'Empfangername')).trim(),\n          address:     String(pick(row, 'Strasse', 'Straße', 'Adresse')).trim(),\n          postal_code: postal,\n          city:        String(pick(row, 'EmpOrt', 'Ort', 'Stadt')).trim(),\n          country,\n        },\n      },\n      goods: [{\n        quantity: qty || (weight ? Math.ceil(weight / 700) : 0),\n        total_weight_kg: weight,\n        description: desc,\n        packaging_type: { name: pkg },\n        custom_fields: { colli: 0, temperature1: temp },\n      }],\n    }],\n  };\n\n  out.push({\n    json: {\n      ...d,\n      classification: {\n        operation,\n        manual_review: missing.length > 0,\n        confidence: missing.length ? 0.7 : 1.0,\n        reason: missing.length ? `Tönnies mapper: mist ${missing.join(',')}` : `Tönnies mapper OK (${kommNr})`,\n        customer_flow: 'tonnies_deterministic',\n        is_new_customer: false,\n        new_customer_domain: '',\n        new_customer_name: '',\n      },\n      qargo_payload: payload,\n      normalized_order: {\n        order_identifier: kommNr,\n        customer_name: customer,\n        pickup_date: pickupDate,\n        delivery_date: delDate,\n        pickup_location: `${pickupLoc.name}, ${pickupLoc.city}`,\n        delivery_location: `${payload.consignments[0].delivery_stop.location.name}, ${payload.consignments[0].delivery_stop.location.city}`,\n        missing_fields: missing,\n      },\n      order_index: orderIdx++,\n      total_orders_in_mail: 0, // filled after loop\n      ai_raw_output: '',\n      mapper_used: 'tonnies_v1',\n    }\n  });\n}\n\n// Fill total count\nfor (const item of out) item.json.total_orders_in_mail = out.length;\n\n// If no rows matched -> fall back to AI by returning nothing and letting router catch it?\n// Simpler: return a single manual_review item so nothing is silently dropped\nif (out.length === 0) {\n  return [{\n    json: {\n      ...d,\n      classification: {\n        operation: 'MANUAL_REVIEW',\n        manual_review: true,\n        confidence: 0,\n        reason: 'Tönnies mapper vond geen rijen met KommNr. Handmatig controleren.',\n        customer_flow: 'tonnies_deterministic_empty',\n        is_new_customer: false,\n      },\n      qargo_payload: '',\n      normalized_order: { order_identifier: '', customer_name: 'Tönnies', missing_fields: ['all'] },\n      ai_raw_output: '',\n      mapper_used: 'tonnies_v1_empty',\n    }\n  }];\n}\n\nreturn out;\n"
+      },
+      "id": "74c0eb69-63be-4a41-b12d-f86771915a59",
+      "name": "Tönnies Mapper",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8784,
+        18704
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ ['tevex.de','toennies.de','tonnies.de','toennies.dk','weidemark.de'].includes(($json.original_sender_address||'').split('@').pop()) }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "tonnies"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "ai"
+        }
+      },
+      "id": "53b2adc3-326c-41d0-9600-899ae6098ba1",
+      "name": "Customer Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.1,
+      "position": [
+        8464,
+        18896
+      ]
+    },
+    {
+      "parameters": {
+        "description": "Zoek een adres op via OpenStreetMap. Gebruik dit wanneer een afzender een onvolledig adres stuurt (bv. alleen bedrijfsnaam + stad). Input: JSON {query: 'Cater Food Ikast Denmark'}. Output: volledig adres met postcode, stad, land, coördinaten.",
+        "jsCode": "\n// Address lookup via OpenStreetMap Nominatim (free, no auth)\n// Input: JSON with {query: \"...search text...\"} or plain text\n// Output: JSON with resolved address or empty\nasync function lookup(q) {\n  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(q);\n  const res = await this.helpers.httpRequest({\n    method: 'GET',\n    url,\n    headers: { 'User-Agent': 'AgroWorld-OrderIntake/1.0 (it@agroworld.nl)' },\n    json: true,\n  });\n  if (!Array.isArray(res) || res.length === 0) return null;\n  const r = res[0];\n  const a = r.address || {};\n  return {\n    name: a.amenity || a.shop || a.building || '',\n    address: [a.road, a.house_number].filter(Boolean).join(' '),\n    postal_code: a.postcode || '',\n    city: a.city || a.town || a.village || a.municipality || '',\n    country: (a.country_code || '').toUpperCase(),\n    latitude: parseFloat(r.lat),\n    longitude: parseFloat(r.lon),\n    display_name: r.display_name,\n  };\n}\n\nlet q = '';\ntry {\n  const parsed = typeof query === 'string' ? JSON.parse(query) : query;\n  q = parsed?.query || parsed?.q || (typeof parsed === 'string' ? parsed : '');\n} catch (e) {\n  q = typeof query === 'string' ? query : '';\n}\nif (!q || q.length < 3) return JSON.stringify({error: 'Geef een zoekterm van minimaal 3 tekens'});\n\ntry {\n  const result = await lookup.call(this, q);\n  return JSON.stringify(result || {error: 'Niet gevonden'});\n} catch (e) {\n  return JSON.stringify({error: String(e.message || e)});\n}\n",
+        "specifyInputSchema": true,
+        "jsonSchemaExample": "{\"query\":\"Cater Food Ikast Denmark\"}"
+      },
+      "id": "bd7477e2-3b16-485c-b924-82a3c2ad6ba3",
+      "name": "Address Lookup Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        9280,
+        19104
+      ]
+    },
+    {
+      "parameters": {
+        "content": "AGRO WORLD AI ORDER INTAKE V8.0.0\n\n=== NIEUW IN V8 ===\n✓ Trigger fix: Get many fetcher verwijderd\n  (voorkomt oneindige re-processing loop)\n✓ Customer Router: deterministische mappers\n  per klant i.p.v. kolom-positie in AI prompt\n✓ Tönnies/Weidemark/Tevex mapper:\n  - Header-name fuzzy matching\n  - KommNr als customer_reference_number\n  - Externe_Belegnr als delivery reference\n  - Robuust tegen kolomvolgorde wijziging\n✓ Address Lookup tool voor AI Agent\n  (Nominatim/OpenStreetMap, gratis, geen auth)\n✓ Per-sender learning: laatste gelukte order\n  wordt in volgende AI prompts getoond als\n  referentie-structuur\n✓ Track Processed draait NU vóór Mark Read\n  (geen dupe-loops meer bij Outlook errors)\n\n=== NOG UIT TE ROLLEN (V8.1+) ===\n- FN Global Meat / Carnimex / Tulling mapper\n  (delen VFPData XML schema)\n- Ekro XLSX mapper\n- Vion XLSX mapper\n- ThermoTraffic PDF mapper\n- Wetralog PDF mapper\n- Coomans XLS mapper\n- Ameco / Goedegebuur mapper\n\nAlle onbekende klanten vallen terug op AI Agent.\n\n=== TESTEN ===\n1. Importeer deze workflow\n2. Check credentials op Outlook, Claude, Qargo\n3. Activeer workflow (toggle rechtsboven)\n4. Stuur test-mail vanuit tevex.de of gebruik\n   een bestaande Tönnies mail in Postvak IN\n5. Check in Executions of Tönnies Mapper pad\n   gebruikt wordt (customer_flow=tonnies_deterministic)\n6. Valideer Qargo upload resultaat",
+        "height": 720,
+        "width": 820
+      },
+      "id": "1fca5642-00ae-4a48-8df4-d1da8c5047cd",
+      "name": "V8 Changelog",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        7104,
+        17264
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Outlook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Email": {
+      "main": [
+        [
+          {
+            "node": "Already Processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Processed?": {
+      "main": [
+        [
+          {
+            "node": "Is Feedback?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Track Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Attachments?": {
+      "main": [
+        [
+          {
+            "node": "Get Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mail-only Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mail-only Context": {
+      "main": [
+        [
+          {
+            "node": "Customer Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Attachments": {
+      "main": [
+        [
+          {
+            "node": "Prep Attachment Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Attachment Meta": {
+      "main": [
+        [
+          {
+            "node": "Attachment Type Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attachment Type Switch": {
+      "main": [
+        [
+          {
+            "node": "Download XML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download XLSX",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download Universal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download XML": {
+      "main": [
+        [
+          {
+            "node": "Extract XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract XML": {
+      "main": [
+        [
+          {
+            "node": "XML Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "XML Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download PDF": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF": {
+      "main": [
+        [
+          {
+            "node": "PDF Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDF Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download XLSX": {
+      "main": [
+        [
+          {
+            "node": "Extract XLSX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract XLSX": {
+      "main": [
+        [
+          {
+            "node": "XLSX Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "XLSX Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Text": {
+      "main": [
+        [
+          {
+            "node": "Text Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Text Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Image": {
+      "main": [
+        [
+          {
+            "node": "Image Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Image Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Universal": {
+      "main": [
+        [
+          {
+            "node": "Universal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Universal Context": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attachment Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Attachment Context": {
+      "main": [
+        [
+          {
+            "node": "Customer Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Memory": {
+      "main": [
+        [
+          {
+            "node": "Build AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Result": {
+      "main": [
+        [
+          {
+            "node": "New Customer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Customer?": {
+      "main": [
+        [
+          {
+            "node": "Register New Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Manual Review Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register New Customer": {
+      "main": [
+        [
+          {
+            "node": "Manual Review Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Review Gate": {
+      "main": [
+        [
+          {
+            "node": "Upload to Qargo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Qargo": {
+      "main": [
+        [
+          {
+            "node": "Validate Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Upload": {
+      "main": [
+        [
+          {
+            "node": "Upload Accepted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Accepted?": {
+      "main": [
+        [
+          {
+            "node": "Wait for Import",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Review Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Import": {
+      "main": [
+        [
+          {
+            "node": "Get Import Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Import Status": {
+      "main": [
+        [
+          {
+            "node": "Finalize Import",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Import": {
+      "main": [
+        [
+          {
+            "node": "Import Status Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Memory": {
+      "main": [
+        [
+          {
+            "node": "Download EML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ignore Gate": {
+      "main": [
+        [
+          {
+            "node": "Ignore Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Review Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Output": {
+      "main": [
+        [
+          {
+            "node": "Move to Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Review": {
+      "main": [
+        [
+          {
+            "node": "Track Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ignore Output": {
+      "main": [
+        [
+          {
+            "node": "Track Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Mail to Folder": {
+      "main": [
+        [
+          {
+            "node": "Move to Client Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Client Folder": {
+      "main": [
+        [
+          {
+            "node": "Track Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Feedback?": {
+      "main": [
+        [
+          {
+            "node": "Store Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Has Attachments?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Feedback": {
+      "main": [
+        [
+          {
+            "node": "Track Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Import Status Check": {
+      "main": [
+        [
+          {
+            "node": "Store Memory",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait for Import",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download EML": {
+      "main": [
+        [
+          {
+            "node": "Fix EML Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fix EML Format": {
+      "main": [
+        [
+          {
+            "node": "Upload EML to Qargo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload EML to Qargo": {
+      "main": [
+        [
+          {
+            "node": "Log EML Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log EML Upload": {
+      "main": [
+        [
+          {
+            "node": "Route Mail to Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Parser Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Track Processed": {
+      "main": [
+        [
+          {
+            "node": "Mark Mail Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer Router": {
+      "main": [
+        [
+          {
+            "node": "Tönnies Mapper",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tönnies Mapper": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Address Lookup Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "0879e881-229d-4936-9048-2d980b85f69d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9db72e2418245a993bef5bec89ab40f45f64174d7b75c5e5e57bd36ae2ee1794"
+  },
+  "id": "dgtZy7pn0hEuQwgY",
+  "tags": []
+}
