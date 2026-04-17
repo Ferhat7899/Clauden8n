@@ -188,7 +188,45 @@ ignore : Mark Mail Read  → Track Processed
 
 ---
 
-## D · Repository layout
+## D · Single importable workflow JSON
+
+As an alternative to patching V8.0.2 node-by-node, the repo also ships a
+pre-assembled workflow with every `lib/*.js` body already inlined:
+
+- `dist/AgroWorld_OrderIntake_V8.1.json` — import this in n8n via
+  *Workflows → Import from File*. 33 nodes, ~67 KB.
+
+The credential references inside the JSON match the existing IDs in your
+n8n instance (`Microsoft Outlook account 2`, `Qargo_Api_Key`, `Anthropic
+account`), so on import n8n should auto-wire the credentials.
+
+Manual wiring still required after import:
+
+1. Open **Outlook Trigger** → Filters → add the Inbox folder IDs you want
+   polled (the template leaves the folder list empty).
+2. Replace **Processed Hits (wire Data Table here)** — currently a `Set`
+   stub that returns an empty `processed_hits` array — with a real
+   *Data Table → Search row* node against your `processed_mails` table,
+   keyed on `internetMessageId`.
+3. Replace **Track Processed (last write)** — currently a Code node that
+   only annotates the item with a `tracked_row` object — with a
+   *Data Table → Insert row* that writes that same object to the table.
+4. In **Move to Client Folder**, either set `$json.client_folder_id` in a
+   preceding `Set` node (per-customer) or replace the move with your
+   existing "Move to Client Folder" subflow.
+5. Same for **Move to Review** (`$json.review_folder_id`).
+
+Regenerating the workflow after editing any `lib/*.js`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build_workflow.ps1
+```
+
+The script reads every `lib/*.js`, JSON-escapes it, splices it into
+`dist/_workflow_template.json`, validates the result parses as JSON,
+and writes `dist/AgroWorld_OrderIntake_V8.1.json`.
+
+## E · Repository layout
 
 ```
 /
@@ -203,5 +241,9 @@ ignore : Mark Mail Read  → Track Processed
 │   ├── validate_upload.js       ← Qargo response validation
 │   └── finalize.js              ← outcome router (upload / review / ignore)
 ├── Agro World AI Order Intake Agent V8.0.2.json   ← source workflow (unchanged)
-└── Orderimport(4).json                             ← legacy workflow (to retire)
+├── Orderimport(4).json                             ← legacy workflow (to retire)
+├── build_workflow.ps1                              ← assembles the file below from lib/*.js
+└── dist/
+    ├── _workflow_template.json                     ← template with __*_JS__ placeholders
+    └── AgroWorld_OrderIntake_V8.1.json             ← SINGLE IMPORTABLE WORKFLOW
 ```
