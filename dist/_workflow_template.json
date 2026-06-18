@@ -1,0 +1,721 @@
+{
+  "name": "Agro World Order Intake V8.1",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [ { "mode": "everyMinute" } ] },
+        "output": "raw",
+        "filters": { "readStatus": "unread" },
+        "options": {}
+      },
+      "id": "node-outlook-trigger",
+      "name": "Outlook Trigger",
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__NORMALIZE_EMAIL_JS__"
+      },
+      "id": "node-normalize",
+      "name": "Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign-processed-hits-empty",
+              "name": "processed_hits",
+              "value": "={{ [] }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-processed-hits-stub",
+      "name": "Processed Hits (wire Data Table here)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 0],
+      "notes": "Replace this Set node with a Data Table Search that queries a 'processed_mails' table for internetMessageId. The Set stub keeps the workflow importable before the table is wired."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__DEDUPE_JS__"
+      },
+      "id": "node-dedupe",
+      "name": "Already Processed?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c-already",
+              "leftValue": "={{ $json.already_processed }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if-processed",
+      "name": "If Already Processed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [960, 0]
+    },
+    {
+      "parameters": {},
+      "id": "node-noop-skip",
+      "name": "Skip (already processed)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1200, -200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c-has-att",
+              "leftValue": "={{ $json.mail.hasAttachments }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if-attachments",
+      "name": "Has Attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "getAll",
+        "messageId": "={{ $json.mail.id }}",
+        "returnAll": true,
+        "additionalFields": {}
+      },
+      "id": "node-get-attachments",
+      "name": "Get Attachments",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [1440, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Collect attachment metadata + decoded text into item.json.attachments[].\n// For XML/JSON/text attachments we return decoded string; binary types pass through.\nconst all = $input.all();\nconst mailItem = all[0]?.json?.mail ? all[0].json : null;\nconst atts = [];\nfor (const it of all) {\n  const a = it.json;\n  if (!a || !a.name) continue;\n  const mime = (a.contentType || '').toLowerCase();\n  const filename = a.name || '';\n  let text = null;\n  if (a.contentBytes && (/xml|json|text|csv/.test(mime) || /\\.(xml|json|txt|csv)$/i.test(filename))) {\n    try { text = Buffer.from(a.contentBytes, 'base64').toString('utf8'); } catch (e) { text = null; }\n  }\n  atts.push({\n    filename,\n    mime,\n    size: a.size || 0,\n    text,\n    contentBytes: a.contentBytes || null,\n    attachmentId: a.id || null,\n    xml_json: null,\n    xlsx_rows: null,\n  });\n}\nreturn [{ json: { ...(mailItem || {}), attachments: atts } }];"
+      },
+      "id": "node-agg-attachments",
+      "name": "Aggregate Attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 100]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign-empty-atts",
+              "name": "attachments",
+              "value": "={{ [] }}",
+              "type": "array"
+            },
+            {
+              "id": "assign-context",
+              "name": "context",
+              "value": "={ \"text\": ($json.mail && $json.mail.body && $json.mail.body.content) ? String($json.mail.body.content).slice(0, 40000) : '' }",
+              "type": "object"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-mail-only",
+      "name": "Mail-only Context",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "typeValidation": "loose", "version": 2 },
+          "combinator": "or",
+          "conditions": [
+            {
+              "id": "c-hpt-sender",
+              "leftValue": "={{ ($json.mail && $json.mail.originalSender) || '' }}",
+              "rightValue": "hpt.dk|therkelsen",
+              "operator": { "type": "string", "operation": "regex" }
+            },
+            {
+              "id": "c-hpt-subject",
+              "leftValue": "={{ ($json.mail && $json.mail.subject) || '' }}",
+              "rightValue": "H\\.?\\s*P\\.?\\s*Therkelsen",
+              "operator": { "type": "string", "operation": "regex" }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if-hpt",
+      "name": "Is HPT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1920, 100]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Flatten PDF text from attachments into json.pdf_text for lib/hpt.js.\nconst out = [];\nfor (const it of $input.all()) {\n  const atts = it.json.attachments || [];\n  const pdfTexts = atts.filter(a => /\\.pdf$/i.test(a.filename) || /pdf/i.test(a.mime || '')).map(a => a.text || '').join('\\n');\n  out.push({ json: { ...it.json, pdf_text: pdfTexts || (it.json.context && it.json.context.text) || '' } });\n}\nreturn out;"
+      },
+      "id": "node-hpt-prep",
+      "name": "Prep HPT PDF Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__HPT_JS__"
+      },
+      "id": "node-hpt-parser",
+      "name": "HPT Parser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__CUSTOMERS_JS__"
+      },
+      "id": "node-customer-router",
+      "name": "Customer Router",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c-needs-ai",
+              "leftValue": "={{ $json.needs_ai === true }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if-ai",
+      "name": "Needs AI?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2400, 200]
+    },
+    {
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "options": {
+          "maxTokensToSample": 4096,
+          "temperature": 0
+        }
+      },
+      "id": "node-claude-model",
+      "name": "Claude Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [2640, 380],
+      "credentials": {
+        "anthropicApi": {
+          "id": "DfsY5RuAzhDs1zPC",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You convert forwarded freight-order emails to Qargo JSON.\n\nReturn ONLY valid JSON with this shape:\n{\"customer\":string|null,\"order_identifier\":string,\"customer_reference_number\":string,\"pickup_stop\":{\"location\":{\"name\":string,\"street\":string,\"postal_code\":string,\"city\":string,\"country\":string,\"raw_address\":string},\"note\":string|null,\"instructions\":string|null},\"delivery_stop\":{...same shape...},\"goods\":[{\"type\":string,\"quantity\":number,\"packaging\":string,\"total_weight_kg\":number,\"temperature_c\":number}],\"metadata\":{\"source\":\"ai-fallback\"},\"needs_review\":boolean}\n\nRules:\n- If a required address or order_identifier is missing set needs_review=true.\n- Do NOT invent addresses. Copy exactly from the input.\n- Truncate each attachment to 12000 chars; total 40000 chars max (already pre-truncated).\n\nMAIL SUBJECT: {{ $json.mail.subject }}\nFROM: {{ $json.mail.originalSender }}\n\nBODY:\n{{ (($json.context && $json.context.text) || '').slice(0, 12000) }}\n\nATTACHMENTS (first 40000 chars total):\n{{ ($json.attachments || []).map(a => '--- ' + a.filename + ' ---\\n' + (a.text || '').slice(0, 12000)).join('\\n\\n').slice(0, 40000) }}",
+        "options": {
+          "systemMessage": "You are a careful logistics data extractor. Return JSON only. No prose."
+        }
+      },
+      "id": "node-ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [2640, 200]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse AI agent output into qargo_payload. On JSON error, flag review.\nconst out = [];\nfor (const it of $input.all()) {\n  const raw = it.json.output || it.json.text || it.json.response || '';\n  let payload = null, review = false, reason = null;\n  try {\n    const s = String(raw).trim();\n    const json = s.startsWith('{') ? s : (s.match(/\\{[\\s\\S]*\\}/) || [null])[0];\n    payload = json ? JSON.parse(json) : null;\n  } catch (e) { review = true; reason = 'ai_parse_error: ' + e.message; }\n  if (!payload) { review = true; reason = reason || 'ai_no_json'; }\n  if (payload && payload.needs_review === true) { review = true; reason = 'ai_flagged_review'; }\n  out.push({ json: { ...it.json, qargo_payload: payload, needs_review: review, review_reason: reason, parser: 'ai-fallback' } });\n}\nreturn out;"
+      },
+      "id": "node-parse-ai",
+      "name": "Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 200]
+    },
+    {
+      "parameters": {},
+      "id": "node-merge",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [3120, 200]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Validate qargo_payload against minimum Qargo schema before upload.\nfunction validate(p){const e=[];if(!p||typeof p!=='object')e.push('not object');if(!p?.order_identifier)e.push('order_identifier');if(!p?.customer)e.push('customer');if(!p?.pickup_stop?.location)e.push('pickup_stop.location');if(!p?.delivery_stop?.location)e.push('delivery_stop.location');if(!Array.isArray(p?.goods)||p.goods.length===0)e.push('goods[]');return{ok:e.length===0,errors:e};}\nconst out=[];\nfor(const it of $input.all()){const p=it.json.qargo_payload;const v=validate(p);out.push({json:{...it.json,payload_valid:v.ok,payload_errors:v.errors,needs_review:it.json.needs_review||!v.ok,review_reason:it.json.review_reason||(!v.ok?'schema_invalid: '+v.errors.join(','):null)}});}\nreturn out;"
+      },
+      "id": "node-validate-payload",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3360, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c-payload-valid",
+              "leftValue": "={{ $json.payload_valid === true && !$json.needs_review }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if-valid",
+      "name": "Valid for Upload?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3600, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.qargo.com/v1/orders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qargo_payload) }}",
+        "options": { "response": { "response": { "fullResponse": true, "responseFormat": "json" } } }
+      },
+      "id": "node-upload-qargo",
+      "name": "Upload to Qargo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3840, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "F7BiRvhFGY6cKMyD",
+          "name": "Qargo_Api_Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__VALIDATE_UPLOAD_JS__"
+      },
+      "id": "node-validate-upload",
+      "name": "Validate Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4080, 100]
+    },
+    {
+      "parameters": { "amount": 30, "unit": "seconds" },
+      "id": "node-wait",
+      "name": "Wait for Import",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [4320, 100],
+      "webhookId": "wait-import-30s"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.qargo.com/v1/orders/{{ $json.qargo_order_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-get-status",
+      "name": "Get Import Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4560, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "F7BiRvhFGY6cKMyD",
+          "name": "Qargo_Api_Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "__FINALIZE_JS__"
+      },
+      "id": "node-finalize",
+      "name": "Finalize Import",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4800, 100]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "upload",
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+                "combinator": "and",
+                "conditions": [
+                  { "id": "c-outcome-upload", "leftValue": "={{ $json.outcome }}", "rightValue": "upload", "operator": { "type": "string", "operation": "equals" } }
+                ]
+              }
+            },
+            {
+              "outputKey": "review",
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+                "combinator": "and",
+                "conditions": [
+                  { "id": "c-outcome-review", "leftValue": "={{ $json.outcome }}", "rightValue": "review", "operator": { "type": "string", "operation": "equals" } }
+                ]
+              }
+            },
+            {
+              "outputKey": "ignore",
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 2 },
+                "combinator": "and",
+                "conditions": [
+                  { "id": "c-outcome-ignore", "leftValue": "={{ $json.outcome }}", "rightValue": "ignore", "operator": { "type": "string", "operation": "equals" } }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-switch-outcome",
+      "name": "Outcome Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [5040, 100]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "update",
+        "messageId": "={{ $json.mail.id }}",
+        "updateFields": { "isRead": true }
+      },
+      "id": "node-mark-read-ok",
+      "name": "Mark Read (upload)",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [5280, -100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "move",
+        "messageId": "={{ $json.mail.id }}",
+        "folderId": "={{ $json.client_folder_id || '' }}"
+      },
+      "id": "node-move-client",
+      "name": "Move to Client Folder",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [5520, -100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "continueOnFail": true,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "move",
+        "messageId": "={{ $json.mail.id }}",
+        "folderId": "={{ $json.review_folder_id || '' }}"
+      },
+      "id": "node-move-review",
+      "name": "Move to Review",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [5280, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "continueOnFail": true,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "update",
+        "messageId": "={{ $json.mail.id }}",
+        "updateFields": { "isRead": true }
+      },
+      "id": "node-mark-read-ignore",
+      "name": "Mark Read (ignore)",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [5280, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "Fb0iihJKhYlRHyZX",
+          "name": "Microsoft Outlook account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Track Processed — MUST be the last write per ARCHITECTURE invariant #1.\n// Replace this Code node with a Data Table 'insert row' node that stores:\n//   internetMessageId, processed_at, outcome, customer, qargo_order_id, review_reason\n// The current body just logs; swapping it out preserves connections.\nconst out=[];\nfor(const it of $input.all()){\n  const row={\n    internetMessageId: it.json.mail_id_for_dedupe || it.json.mail?.internetMessageId || null,\n    processed_at: new Date().toISOString(),\n    outcome: it.json.outcome || null,\n    customer: it.json.customer || null,\n    qargo_order_id: it.json.qargo_order_id || null,\n    review_reason: it.json.review_reason || it.json.finalize_reason || null,\n  };\n  out.push({ json: { ...it.json, tracked_row: row } });\n}\nreturn out;"
+      },
+      "id": "node-track-processed",
+      "name": "Track Processed (last write)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5760, 100]
+    },
+    {
+      "parameters": {
+        "content": "## Agro World Order Intake V8.1\n\n**Drop-in Code nodes:**\n- Normalize Email → lib/normalize_email.js\n- Already Processed? → lib/dedupe.js\n- HPT Parser → lib/hpt.js (Emstek rule)\n- Customer Router → lib/customers.js (10 deterministic mappers)\n- Validate Upload → lib/validate_upload.js\n- Finalize Import → lib/finalize.js\n\n**Before running:**\n1. Replace 'Processed Hits' Set stub with a Data Table → Search row lookup.\n2. Replace 'Track Processed (last write)' Code node body with a Data Table → Insert row.\n3. Set `client_folder_id` and `review_folder_id` per customer (Memory / Load Memory).\n4. Confirm the three credential IDs still resolve:\n   - Microsoft Outlook account 2\n   - Qargo_Api_Key\n   - Anthropic account\n\nSee PATCHES.md §B for the per-node migration plan.",
+        "height": 400,
+        "width": 420
+      },
+      "id": "node-sticky",
+      "name": "V8.1 Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-300, -420]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Outlook Trigger": {
+      "main": [ [ { "node": "Normalize Email", "type": "main", "index": 0 } ] ]
+    },
+    "Normalize Email": {
+      "main": [ [ { "node": "Processed Hits (wire Data Table here)", "type": "main", "index": 0 } ] ]
+    },
+    "Processed Hits (wire Data Table here)": {
+      "main": [ [ { "node": "Already Processed?", "type": "main", "index": 0 } ] ]
+    },
+    "Already Processed?": {
+      "main": [ [ { "node": "If Already Processed", "type": "main", "index": 0 } ] ]
+    },
+    "If Already Processed": {
+      "main": [
+        [ { "node": "Skip (already processed)", "type": "main", "index": 0 } ],
+        [ { "node": "Has Attachments?", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Has Attachments?": {
+      "main": [
+        [ { "node": "Get Attachments", "type": "main", "index": 0 } ],
+        [ { "node": "Mail-only Context", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Get Attachments": {
+      "main": [ [ { "node": "Aggregate Attachments", "type": "main", "index": 0 } ] ]
+    },
+    "Aggregate Attachments": {
+      "main": [ [ { "node": "Is HPT?", "type": "main", "index": 0 } ] ]
+    },
+    "Mail-only Context": {
+      "main": [ [ { "node": "Is HPT?", "type": "main", "index": 0 } ] ]
+    },
+    "Is HPT?": {
+      "main": [
+        [ { "node": "Prep HPT PDF Text", "type": "main", "index": 0 } ],
+        [ { "node": "Customer Router", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Prep HPT PDF Text": {
+      "main": [ [ { "node": "HPT Parser", "type": "main", "index": 0 } ] ]
+    },
+    "HPT Parser": {
+      "main": [ [ { "node": "Needs AI?", "type": "main", "index": 0 } ] ]
+    },
+    "Customer Router": {
+      "main": [ [ { "node": "Needs AI?", "type": "main", "index": 0 } ] ]
+    },
+    "Needs AI?": {
+      "main": [
+        [ { "node": "AI Agent", "type": "main", "index": 0 } ],
+        [ { "node": "Merge", "type": "main", "index": 1 } ]
+      ]
+    },
+    "Claude Model": {
+      "ai_languageModel": [ [ { "node": "AI Agent", "type": "ai_languageModel", "index": 0 } ] ]
+    },
+    "AI Agent": {
+      "main": [ [ { "node": "Parse AI Result", "type": "main", "index": 0 } ] ]
+    },
+    "Parse AI Result": {
+      "main": [ [ { "node": "Merge", "type": "main", "index": 0 } ] ]
+    },
+    "Merge": {
+      "main": [ [ { "node": "Validate Payload", "type": "main", "index": 0 } ] ]
+    },
+    "Validate Payload": {
+      "main": [ [ { "node": "Valid for Upload?", "type": "main", "index": 0 } ] ]
+    },
+    "Valid for Upload?": {
+      "main": [
+        [ { "node": "Upload to Qargo", "type": "main", "index": 0 } ],
+        [ { "node": "Move to Review", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Upload to Qargo": {
+      "main": [ [ { "node": "Validate Upload", "type": "main", "index": 0 } ] ]
+    },
+    "Validate Upload": {
+      "main": [ [ { "node": "Wait for Import", "type": "main", "index": 0 } ] ]
+    },
+    "Wait for Import": {
+      "main": [ [ { "node": "Get Import Status", "type": "main", "index": 0 } ] ]
+    },
+    "Get Import Status": {
+      "main": [ [ { "node": "Finalize Import", "type": "main", "index": 0 } ] ]
+    },
+    "Finalize Import": {
+      "main": [ [ { "node": "Outcome Switch", "type": "main", "index": 0 } ] ]
+    },
+    "Outcome Switch": {
+      "main": [
+        [ { "node": "Mark Read (upload)", "type": "main", "index": 0 } ],
+        [ { "node": "Move to Review", "type": "main", "index": 0 } ],
+        [ { "node": "Mark Read (ignore)", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Mark Read (upload)": {
+      "main": [ [ { "node": "Move to Client Folder", "type": "main", "index": 0 } ] ]
+    },
+    "Move to Client Folder": {
+      "main": [ [ { "node": "Track Processed (last write)", "type": "main", "index": 0 } ] ]
+    },
+    "Move to Review": {
+      "main": [ [ { "node": "Track Processed (last write)", "type": "main", "index": 0 } ] ]
+    },
+    "Mark Read (ignore)": {
+      "main": [ [ { "node": "Track Processed (last write)", "type": "main", "index": 0 } ] ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [ { "name": "order-intake" }, { "name": "v8.1" } ]
+}
